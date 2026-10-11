@@ -1,6 +1,6 @@
 node_modules/
 build/
-dist/
+# dist/ متتبَّع عمدًا (الواجهة مبنيّة مسبقًا لبيئة الاستضافة المغلقة)
 coverage/
 .DS_Store
 *.log

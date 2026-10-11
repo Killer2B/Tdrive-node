@@ -1,8 +1,9 @@
 # deps / build
 node_modules/
-dist/
-web/dist/
+/dist/
 web/node_modules/
+# ملاحظة: web/dist متتبَّع عمدًا — بيئة الاستضافة المغلقة تحظر بناء Vite (esbuild)،
+# فنوزّع الواجهة مبنيّة مسبقًا ليقدّمها الخادم مباشرةً.
 
 # lockfiles تُولَّد لكل بيئة؛ إبقاؤها خارج Git يمنع تعارض git pull التلقائيّ (AUTO_UPDATE)
 package-lock.json
