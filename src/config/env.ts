@@ -145,6 +145,8 @@ let cached: Config | null = null;
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (cached) return cached;
   ensureDotenv();
+  // بيئات الاستضافة المُدارة (Pterodactyl/HidenCloud) تحقن المنفذ عبر SERVER_PORT
+  if (!process.env.PORT && process.env.SERVER_PORT) process.env.PORT = process.env.SERVER_PORT;
   const source = env === process.env ? process.env : env;
   const parsed = envSchema.safeParse(source);
   if (!parsed.success) {
