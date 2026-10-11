@@ -45,7 +45,7 @@
 | W5 | `resilience.ts:6-9,66-242` | عدّادات عامّة لكل isolate + DO leases «كحماية ذاكرة» | قبول/تقنين عبر `@fastify/rate-limit` + `bodyLimit`/`requestTimeout` + `stream.pipeline` بحارس خمول | مُعاد تصميمه |
 | W6 | `files.ts:120-123` | `FixedLengthStream` (Web API خاص بـ CF) | `stream.pipeline` + تمرير الطول المعروف إلى المحوّل | مُعاد تصميمه |
 | W7 | `jobs.ts:130-175,396-414` | `JobRun` حول قيود Worker (RPC غير قابلة للإلغاء، deadline-abort، `waitUntil`) | `AbortController` حقيقي + `await` عادي + حلقة عامل محليّة؛ منطق الـ lease/fence محفوظ | مُعاد تصميمه |
-| W8 | البروتوتايب كلّه | تخزين Telegram + R2 كـ«كاش» | **محوّل تخزين مجرّد**: `LocalDisk` (افتراضي) + `S3Compatible`؛ لا Telegram إطلاقًا | مُعاد تصميمه |
+| W8 | البروتوتايب كلّه | تخزين Telegram + R2 كـ«كاش» | **محفوظ معماريًّا**: Telegram هو التخزين الدائم والنهائي (قطع ≤18MB كمستندات)، ومحوّل التخزين (`LocalDisk`/`S3`) صار **كاش القرص** القابل للإخلاء بدل R2، وأُزيلت تبعيات R2/DO فقط. | مُعاد تصميمه |
 | W9 | كل `src/*.ts` | `import { LIMITS } from '../../src/limits'` — **الملف غير موجود** في الشجرة؛ لا يُترجَم كما هو | وحدة إعدادات مُنمَّطة واحدة (`src/config/env.ts`) + حدود صريحة ومُختبَرة | مُصلَح+اختبار |
 
 ---

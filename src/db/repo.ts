@@ -35,7 +35,7 @@ export interface FolderRow {
 }
 
 export type FileType = 'video' | 'design' | 'code' | 'doc' | 'archive' | 'bin' | 'folder';
-export type FileStatus = 'pending' | 'ready' | 'error';
+export type FileStatus = 'pending' | 'processing' | 'ready' | 'error';
 export type FileSource = 'upload' | 'url' | 'ytdlp';
 
 export interface FileRow {
@@ -60,8 +60,22 @@ export interface FileRow {
   pinned: number;
   trashed: number;
   trashed_at: number | null;
+  backend: string;
+  chunk_size: number | null;
+  thumb_tg_file_id: string | null;
+  thumb_tg_message_id: number | null;
   created_at: number;
   updated_at: number;
+}
+
+export interface FileChunkRow {
+  file_id: string;
+  idx: number;
+  size: number;
+  sha256: string | null;
+  tg_message_id: number | null;
+  tg_file_id: string | null;
+  cached: number;
 }
 
 export interface UploadRow {
@@ -272,14 +286,20 @@ export const Files = {
       pinned: input.pinned ?? 0,
       trashed: input.trashed ?? 0,
       trashed_at: input.trashed_at ?? null,
+      backend: input.backend ?? 'telegram',
+      chunk_size: input.chunk_size ?? null,
+      thumb_tg_file_id: input.thumb_tg_file_id ?? null,
+      thumb_tg_message_id: input.thumb_tg_message_id ?? null,
       created_at: input.created_at ?? ts,
       updated_at: input.updated_at ?? ts,
     };
     db.prepare(
       `INSERT INTO files (id,user_id,folder_id,name,ext,type,mime,size,storage_key,sha256,status,source,source_url,
-          thumb_key,duration,width,height,starred,pinned,trashed,trashed_at,created_at,updated_at)
+          thumb_key,duration,width,height,starred,pinned,trashed,trashed_at,backend,chunk_size,thumb_tg_file_id,
+          thumb_tg_message_id,created_at,updated_at)
        VALUES (@id,@user_id,@folder_id,@name,@ext,@type,@mime,@size,@storage_key,@sha256,@status,@source,@source_url,
-          @thumb_key,@duration,@width,@height,@starred,@pinned,@trashed,@trashed_at,@created_at,@updated_at)`,
+          @thumb_key,@duration,@width,@height,@starred,@pinned,@trashed,@trashed_at,@backend,@chunk_size,@thumb_tg_file_id,
+          @thumb_tg_message_id,@created_at,@updated_at)`,
     ).run(row);
     return row;
   },
@@ -339,6 +359,7 @@ export const Files = {
     const allowed = [
       'folder_id', 'name', 'ext', 'type', 'mime', 'size', 'storage_key', 'sha256', 'status',
       'source_url', 'thumb_key', 'duration', 'width', 'height', 'starred', 'pinned', 'trashed', 'trashed_at',
+      'backend', 'chunk_size', 'thumb_tg_file_id', 'thumb_tg_message_id',
     ] as const;
     const sets: string[] = [];
     const params: Record<string, unknown> = { id, updated_at: now() };
@@ -364,6 +385,68 @@ export const Files = {
       .prepare("SELECT IFNULL(SUM(size),0) AS s FROM files WHERE user_id = ? AND status = 'ready'")
       .get(user_id) as { s: number };
     return r.s;
+  },
+};
+
+// ===== قطع المحتوى (Telegram/الكاش) =====
+export const FileChunks = {
+  add(input: {
+    file_id: string;
+    idx: number;
+    size: number;
+    sha256: string | null;
+    cached?: boolean;
+    tg_message_id?: number | null;
+    tg_file_id?: string | null;
+  }): void {
+    getDb()
+      .prepare(
+        `INSERT INTO file_chunks (file_id, idx, size, sha256, tg_message_id, tg_file_id, cached)
+         VALUES (@file_id, @idx, @size, @sha256, @tg_message_id, @tg_file_id, @cached)
+         ON CONFLICT(file_id, idx) DO UPDATE SET size=excluded.size, sha256=excluded.sha256`,
+      )
+      .run({
+        file_id: input.file_id,
+        idx: input.idx,
+        size: input.size,
+        sha256: input.sha256,
+        tg_message_id: input.tg_message_id ?? null,
+        tg_file_id: input.tg_file_id ?? null,
+        cached: input.cached === false ? 0 : 1,
+      });
+  },
+  listByFile(file_id: string): FileChunkRow[] {
+    return getDb()
+      .prepare('SELECT * FROM file_chunks WHERE file_id = ? ORDER BY idx')
+      .all(file_id) as FileChunkRow[];
+  },
+  get(file_id: string, idx: number): FileChunkRow | undefined {
+    return getDb()
+      .prepare('SELECT * FROM file_chunks WHERE file_id = ? AND idx = ?')
+      .get(file_id, idx) as FileChunkRow | undefined;
+  },
+  setTg(file_id: string, idx: number, tg_message_id: number, tg_file_id: string): void {
+    getDb()
+      .prepare('UPDATE file_chunks SET tg_message_id = ?, tg_file_id = ? WHERE file_id = ? AND idx = ?')
+      .run(tg_message_id, tg_file_id, file_id, idx);
+  },
+  setCached(file_id: string, idx: number, cached: boolean): void {
+    getDb().prepare('UPDATE file_chunks SET cached = ? WHERE file_id = ? AND idx = ?').run(bool(cached), file_id, idx);
+  },
+  pending(file_id: string): FileChunkRow[] {
+    return getDb()
+      .prepare('SELECT * FROM file_chunks WHERE file_id = ? AND tg_file_id IS NULL ORDER BY idx')
+      .all(file_id) as FileChunkRow[];
+  },
+  countPending(file_id: string): number {
+    return (
+      getDb().prepare('SELECT COUNT(*) AS c FROM file_chunks WHERE file_id = ? AND tg_file_id IS NULL').get(file_id) as {
+        c: number;
+      }
+    ).c;
+  },
+  deleteByFile(file_id: string): void {
+    getDb().prepare('DELETE FROM file_chunks WHERE file_id = ?').run(file_id);
   },
 };
 

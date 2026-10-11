@@ -1,9 +1,8 @@
 /** خدمة الملفّات: التصنيف، الإدخال للتخزين، البثّ، سلّة المهملات، والاستخدام. */
-import { stat } from 'node:fs/promises';
+import { stat, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { createReadStream } from 'node:fs';
-import { Files, type FileRow, type FileType, type FileSource } from '../db/repo.ts';
+import { Files, FileChunks, type FileRow, type FileType, type FileSource } from '../db/repo.ts';
 import { getStorage } from '../storage/index.ts';
 import { sha256OfFile } from '../lib/hash.ts';
 import { sanitizeFileName, splitExt } from '../lib/paths.ts';
@@ -12,6 +11,8 @@ import { errors } from '../lib/errors.ts';
 import { getLogger } from '../lib/logger.ts';
 import { probeMedia, generateThumbnail, ffmpegAvailable } from './ffmpeg.ts';
 import { newId } from '../lib/ids.ts';
+import { splitFileIntoChunks, createRangeStream, deleteCacheChunks } from './chunkstore.ts';
+import * as telegram from './telegram.ts';
 
 const TYPE_BY_EXT: Record<string, FileType> = {};
 const addTypes = (type: FileType, exts: string[]): void => {
@@ -66,11 +67,10 @@ export function uniqueName(userId: string, folderId: string | null, desired: str
   return `${stem}-${newId()}${ext}`;
 }
 
-function storageKeyFor(fileId: string, name: string): string {
-  const ext = extOf(name);
-  const safeExt = ext && /^[a-z0-9]{1,12}$/.test(ext) ? `.${ext}` : '';
-  return `files/${fileId}${safeExt}`;
+function storageKeyForUnused(): void {
+  /* نمط التخزين الكامل القديم أُزيل لصالح نموذج القطع (Telegram + كاش). */
 }
+void storageKeyForUnused;
 
 export interface IngestParams {
   userId: string;
@@ -102,14 +102,15 @@ export async function ingestLocalFile(params: IngestParams): Promise<FileRow> {
   const type = classifyType(name);
   const mime = mimeForName(name, params.mime);
   const fileId = newId('fil');
-  const key = storageKeyFor(fileId, name);
+  const chunkSize = cfg.upload.chunkSize;
+  const telegramBackend = cfg.content.backend === 'telegram';
 
   let sha = params.sha256 ?? null;
   if (!sha && params.computeSha) {
     sha = await sha256OfFile(params.tempPath);
   }
 
-  // فحص الوسائط (المدّة/الأبعاد) قبل نقل الملف
+  // فحص الوسائط (المدّة/الأبعاد) قبل التقطيع
   let duration: number | undefined;
   let width: number | undefined;
   let height: number | undefined;
@@ -120,7 +121,7 @@ export async function ingestLocalFile(params: IngestParams): Promise<FileRow> {
     height = info.height;
   }
 
-  // توليد صورة مصغّرة (أفضل جهد) قبل استهلاك الملف المؤقّت
+  // صورة مصغّرة → تُحفظ في محوّل التخزين (ثابتة، صغيرة، غير مقطّعة)
   let thumbKey: string | null = null;
   if (type === 'video' && cfg.tools.thumbnailsEnabled && (await ffmpegAvailable())) {
     const thumbTmp = path.join(cfg.storage.tmpDir, `thumb-${fileId}.jpg`);
@@ -136,9 +137,6 @@ export async function ingestLocalFile(params: IngestParams): Promise<FileRow> {
     }
   }
 
-  // نقل الملف إلى التخزين (يستهلك الملف المؤقّت)
-  const putResult = await storage.putFile(key, params.tempPath, { contentType: mime });
-
   const row = Files.create({
     id: fileId,
     user_id: params.userId,
@@ -147,18 +145,25 @@ export async function ingestLocalFile(params: IngestParams): Promise<FileRow> {
     ext: extOf(name) || null,
     type,
     mime,
-    size: putResult.size || st.size,
-    storage_key: key,
+    size: st.size,
+    storage_key: null,
     sha256: sha,
-    status: 'ready',
+    status: telegramBackend ? 'processing' : 'ready',
     source: params.source,
     source_url: params.sourceUrl ?? null,
     thumb_key: thumbKey,
     duration: duration ?? null,
     width: width ?? null,
     height: height ?? null,
+    backend: cfg.content.backend,
+    chunk_size: chunkSize,
   });
-  log.info({ fileId, name, size: row.size, source: params.source }, 'أُدخل ملف جديد');
+
+  // تقطيع الملف إلى قطع في الكاش + تسجيل file_chunks، ثم حذف المؤقّت
+  await splitFileIntoChunks(fileId, params.tempPath, st.size, chunkSize);
+  await rm(params.tempPath, { force: true }).catch(() => {});
+
+  log.info({ fileId, name, size: row.size, source: params.source, backend: cfg.content.backend }, 'أُدخل ملف جديد (مقطّع)');
   return row;
 }
 
@@ -169,17 +174,26 @@ export interface OpenedStream {
   isInline: boolean;
 }
 
-/** يفتح تدفّق قراءة لملف (كامل أو نطاق). */
+/** يفتح تدفّق قراءة لملف (كامل أو نطاق) عبر القطع (كاش أو Telegram). */
 export async function openFileRange(
   file: FileRow,
   range?: { start: number; end: number },
 ): Promise<OpenedStream> {
-  if (!file.storage_key || file.status !== 'ready') {
+  const mime = file.mime ?? mimeForName(file.name);
+  const chunks = FileChunks.listByFile(file.id);
+
+  if (chunks.length === 0) {
+    // توافق مع ملفّات نمط الكائن الكامل القديم (إن وُجدت)
+    if (file.storage_key) {
+      const stream = await getStorage().createReadStream(file.storage_key, range);
+      return { stream, size: file.size, contentType: mime, isInline: isInlineSafe(mime) };
+    }
     throw errors.notFound('الملف غير جاهز للتنزيل بعد.');
   }
-  const storage = getStorage();
-  const mime = file.mime ?? mimeForName(file.name);
-  const stream = await storage.createReadStream(file.storage_key, range);
+
+  const start = range?.start ?? 0;
+  const end = range?.end ?? Math.max(0, file.size - 1);
+  const stream = createRangeStream(file, chunks, start, end);
   return { stream, size: file.size, contentType: mime, isInline: isInlineSafe(mime) };
 }
 
@@ -206,9 +220,22 @@ export function restoreFile(file: FileRow): void {
 
 export async function deleteFilePermanent(file: FileRow): Promise<void> {
   const storage = getStorage();
+  const chunks = FileChunks.listByFile(file.id);
+  await deleteCacheChunks(file.id, chunks);
   if (file.storage_key) await storage.delete(file.storage_key).catch(() => {});
   if (file.thumb_key) await storage.delete(file.thumb_key).catch(() => {});
+  FileChunks.deleteByFile(file.id);
   Files.delete(file.id);
+
+  // حذف رسائل Telegram في الخلفية (أفضل جهد؛ لا يُعطّل الاستجابة)
+  if (file.backend === 'telegram') {
+    const ids = chunks.map((c) => c.tg_message_id).filter((x): x is number => typeof x === 'number');
+    if (ids.length > 0) {
+      void (async () => {
+        for (const id of ids) await telegram.deleteMessage(id).catch(() => {});
+      })();
+    }
+  }
 }
 
 export interface StorageUsage {

@@ -1,18 +1,19 @@
 /** خدمة الرفع المجزّأ القابل للاستئناف (init → part → complete/abort). */
-import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdir, rm, stat } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
-import { once } from 'node:events';
+import { createWriteStream } from 'node:fs';
+import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { Uploads, Files, type UploadRow, type FileRow } from '../db/repo.ts';
+import { Uploads, Files, FileChunks, type UploadRow, type FileRow } from '../db/repo.ts';
 import { planChunks, sizeOfChunk, toRanges, missingChunks } from '../lib/chunking.ts';
 import { HashingPassThrough, fingerprintFromChunkHashes, hashesEqual } from '../lib/hash.ts';
 import { loadConfig } from '../config/env.ts';
 import { errors } from '../lib/errors.ts';
 import { sanitizeFileName } from '../lib/paths.ts';
-import { ingestLocalFile, toApiFile } from './files.ts';
+import { newId } from '../lib/ids.ts';
+import { classifyType, mimeForName, extOf, uniqueName, toApiFile } from './files.ts';
+import { cacheChunkFromPath } from './chunkstore.ts';
+import { enqueueFlush } from './queue.ts';
 import { getLogger } from '../lib/logger.ts';
 
 const UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
@@ -176,30 +177,7 @@ export function uploadStatus(userId: string, uploadId: string): StatusResult {
   };
 }
 
-/** يدمج الأجزاء المرتّبة في ملف واحد ويحسب SHA-256 الكامل مع backpressure. */
-async function assembleParts(uploadId: string, totalChunks: number, destPath: string): Promise<string> {
-  const hash = createHash('sha256');
-  const out = createWriteStream(destPath);
-  for (let i = 0; i < totalChunks; i++) {
-    const src = createReadStream(partPath(uploadId, i));
-    await new Promise<void>((resolve, reject) => {
-      src.on('data', (d: Buffer) => {
-        hash.update(d);
-        if (!out.write(d)) {
-          src.pause();
-          out.once('drain', () => src.resume());
-        }
-      });
-      src.on('end', resolve);
-      src.on('error', reject);
-    });
-  }
-  out.end();
-  await once(out, 'finish');
-  return hash.digest('hex');
-}
-
-/** يُكمل الرفع: يتحقّق من اكتمال الأجزاء وسلامتها، يدمجها، وينشئ الملف. */
+/** يُكمل الرفع: يتحقّق من اكتمال الأجزاء وسلامتها، ينقلها للكاش كقطع، وينشئ الملف. */
 export async function completeUpload(input: {
   userId: string;
   uploadId: string;
@@ -233,32 +211,42 @@ export async function completeUpload(input: {
     }
   }
 
-  await mkdir(cfg.storage.tmpDir, { recursive: true });
-  const assembledPath = path.join(cfg.storage.tmpDir, `assembled-${upload.id}`);
-  let sha: string;
-  try {
-    sha = await assembleParts(upload.id, upload.total_chunks, assembledPath);
-    const st = await stat(assembledPath);
-    if (st.size !== upload.size) {
-      throw errors.unprocessable(`الحجم المدموج (${st.size}) لا يطابق المعلن (${upload.size}).`);
-    }
-  } catch (e) {
-    await rm(assembledPath, { force: true }).catch(() => {});
-    throw e;
-  }
+  const chunkSize = upload.chunk_size;
+  const name = uniqueName(upload.user_id, upload.folder_id, upload.name);
+  const type = classifyType(name);
+  const mime = mimeForName(name);
+  const fileId = newId('fil');
+  const telegramBackend = cfg.content.backend === 'telegram';
+  const sha = upload.fingerprint ?? fingerprintFromChunkHashes(chunks.map((c) => c.sha256));
 
-  const fileRow = await ingestLocalFile({
-    userId: upload.user_id,
-    folderId: upload.folder_id,
-    name: upload.name,
-    tempPath: assembledPath,
-    source: 'upload',
+  const fileRow: FileRow = Files.create({
+    id: fileId,
+    user_id: upload.user_id,
+    folder_id: upload.folder_id,
+    name,
+    ext: extOf(name) || null,
+    type,
+    mime,
+    size: upload.size,
+    storage_key: null,
     sha256: sha,
+    status: telegramBackend ? 'processing' : 'ready',
+    source: 'upload',
+    backend: cfg.content.backend,
+    chunk_size: chunkSize,
   });
+
+  // انقل ملفّات الأجزاء إلى قطع الكاش + سجّل file_chunks
+  for (const c of chunks) {
+    await cacheChunkFromPath(fileId, c.idx, partPath(upload.id, c.idx));
+    FileChunks.add({ file_id: fileId, idx: c.idx, size: c.size, sha256: c.sha256, cached: true });
+  }
 
   Uploads.setStatus(upload.id, 'completed', fileRow.id);
   await rm(partDir(upload.id), { recursive: true, force: true }).catch(() => {});
-  log.info({ uploadId: upload.id, fileId: fileRow.id }, 'اكتمل الرفع');
+  if (telegramBackend) enqueueFlush(upload.user_id, fileId, name);
+
+  log.info({ uploadId: upload.id, fileId, backend: cfg.content.backend }, 'اكتمل الرفع (مقطّع)');
   return { file: toApiFile(fileRow), fileRow };
 }
 

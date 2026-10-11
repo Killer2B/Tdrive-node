@@ -60,6 +60,15 @@ const envSchema = z.object({
   S3_SECRET_ACCESS_KEY: z.string().optional(),
   S3_FORCE_PATH_STYLE: boolish.default(true),
 
+  // backend التخزين الدائم للمحتوى: telegram (أساسي) أو local (القرص دائم)
+  CONTENT_BACKEND: z.enum(['telegram', 'local']).default('telegram'),
+  TG_BOT_TOKEN: z.string().optional(),
+  TG_CHAT_ID: z.string().optional(),
+  TG_MIN_GAP_MS: z.coerce.number().int().nonnegative().default(3000),
+  TG_API_BASE: z.string().default('https://api.telegram.org'),
+  // سقف كاش القطع على القرص (GB) — يُخلى تلقائيًّا للقطع المؤكّدة على Telegram
+  CACHE_CAP_GB: z.coerce.number().positive().default(4),
+
   CHUNK_SIZE_MB: z.coerce.number().positive().default(18),
   MAX_FILE_SIZE_GB: z.coerce.number().nonnegative().default(0),
   MAX_PART_BODY_MB: z.coerce.number().positive().default(20),
@@ -110,6 +119,9 @@ export interface Config {
       forcePathStyle: boolean;
     };
   };
+  content: { backend: 'telegram' | 'local' };
+  telegram: { token?: string; chatId?: string; minGapMs: number; apiBase: string };
+  cache: { capBytes: number };
   upload: { chunkSize: number; maxFileSize: number; maxPartBody: number };
   queue: {
     downloadConcurrency: number;
@@ -154,6 +166,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (e.BACKUP_ENABLED && !e.MYSQL_BACKUP_URL) {
     throw new Error('BACKUP_ENABLED=true لكن MYSQL_BACKUP_URL غير مضبوط');
   }
+  if (e.CONTENT_BACKEND === 'telegram') {
+    if (!e.TG_BOT_TOKEN) throw new Error('CONTENT_BACKEND=telegram لكن TG_BOT_TOKEN غير مضبوط');
+    if (!e.TG_CHAT_ID) throw new Error('CONTENT_BACKEND=telegram لكن TG_CHAT_ID غير مضبوط');
+  }
 
   cached = {
     nodeEnv: e.NODE_ENV,
@@ -178,6 +194,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         forcePathStyle: e.S3_FORCE_PATH_STYLE,
       },
     },
+    content: { backend: e.CONTENT_BACKEND },
+    telegram: {
+      token: e.TG_BOT_TOKEN,
+      chatId: e.TG_CHAT_ID,
+      minGapMs: e.TG_MIN_GAP_MS,
+      apiBase: e.TG_API_BASE.replace(/\/+$/, ''),
+    },
+    cache: { capBytes: gbToBytes(e.CACHE_CAP_GB) },
     upload: {
       chunkSize: mbToBytes(e.CHUNK_SIZE_MB),
       maxFileSize: e.MAX_FILE_SIZE_GB > 0 ? gbToBytes(e.MAX_FILE_SIZE_GB) : 0,

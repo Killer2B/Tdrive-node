@@ -162,4 +162,27 @@ export const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    id: '0002_telegram_backend',
+    up: /* sql */ `
+      -- قطع المحتوى الدائمة (المصدر الحقيقيّ لمكان بايتات الملف)
+      CREATE TABLE file_chunks (
+        file_id       TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        idx           INTEGER NOT NULL,
+        size          INTEGER NOT NULL,
+        sha256        TEXT,
+        tg_message_id INTEGER,
+        tg_file_id    TEXT,
+        cached        INTEGER NOT NULL DEFAULT 1,
+        PRIMARY KEY (file_id, idx)
+      );
+      CREATE INDEX idx_file_chunks_file ON file_chunks(file_id, idx);
+
+      -- أعمدة backend التخزين لكل ملف
+      ALTER TABLE files ADD COLUMN backend TEXT NOT NULL DEFAULT 'telegram';
+      ALTER TABLE files ADD COLUMN chunk_size INTEGER;
+      ALTER TABLE files ADD COLUMN thumb_tg_file_id TEXT;
+      ALTER TABLE files ADD COLUMN thumb_tg_message_id INTEGER;
+    `,
+  },
 ];

@@ -9,6 +9,7 @@ import { loadConfig } from '../config/env.ts';
 import { hashPassword, verifyPassword } from '../services/auth.ts';
 import { version as ytdlpVersion, update as ytdlpUpdate } from '../services/ytdlp.ts';
 import { ffmpegAvailable } from '../services/ffmpeg.ts';
+import { checkConnection as tgCheck } from '../services/telegram.ts';
 
 const DEFAULT_SETTINGS = {
   theme: 'dark',
@@ -50,10 +51,16 @@ export default async function miscRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/system', async (request) => {
     requireUser(request);
-    const [ytdlp, ffmpeg] = await Promise.all([ytdlpVersion(), ffmpegAvailable()]);
+    const [ytdlp, ffmpeg, tg] = await Promise.all([
+      ytdlpVersion(),
+      ffmpegAvailable(),
+      cfg.content.backend === 'telegram' ? tgCheck() : Promise.resolve({ ok: false, detail: 'disabled' }),
+    ]);
     return {
       ytdlp: { installed: !!ytdlp, version: ytdlp },
       ffmpeg: { installed: ffmpeg },
+      contentBackend: cfg.content.backend,
+      telegram: { enabled: cfg.content.backend === 'telegram', connected: tg.ok, detail: tg.detail },
       storageDriver: cfg.storage.driver,
       chunkSizeMB: Math.round(cfg.upload.chunkSize / (1024 * 1024)),
       maxFileSizeGB: cfg.upload.maxFileSize > 0 ? Math.round(cfg.upload.maxFileSize / (1024 * 1024 * 1024)) : 0,

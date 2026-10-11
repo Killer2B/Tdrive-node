@@ -4,6 +4,7 @@ import { loadConfig } from '../config/env.ts';
 import { getLogger } from '../lib/logger.ts';
 import { cleanupExpiredUploads } from './uploads.ts';
 import { runBackup } from './backup.ts';
+import { evictCache } from './chunkstore.ts';
 
 const TICK_MS = 5 * 60 * 1000; // كل 5 دقائق
 const CLEANUP_INTERVAL_MS = 55 * 60 * 1000; // ~كل ساعة
@@ -31,6 +32,16 @@ async function tick(): Promise<void> {
       const jobs = Jobs.deleteDoneBefore(now - JOB_RETENTION_MS);
       Kv.set('last_cleanup', String(now));
       log.debug({ sessions, uploads, jobs }, 'تنظيف دوريّ');
+    }
+
+    // إخلاء كاش القطع المؤكّدة على Telegram عند تجاوز السقف
+    if (cfg.content.backend === 'telegram') {
+      try {
+        const { evicted, freed } = await evictCache();
+        if (evicted > 0) log.debug({ evicted, freed }, 'إخلاء كاش القطع');
+      } catch (e) {
+        log.debug({ err: String(e) }, 'تعذّر إخلاء الكاش');
+      }
     }
 
     if (cfg.backup.enabled) {

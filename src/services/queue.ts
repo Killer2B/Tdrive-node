@@ -1,7 +1,7 @@
 /** طابور المهام الدائم: تحميلات ثقيلة بتزامن قابل للضبط، إلغاء، وإعادة محاولة بتراجع أسّي. */
 import path from 'node:path';
 import { mkdir, rm } from 'node:fs/promises';
-import { Jobs, type JobRow } from '../db/repo.ts';
+import { Jobs, Files, FileChunks, type JobRow } from '../db/repo.ts';
 import { loadConfig } from '../config/env.ts';
 import { getLogger } from '../lib/logger.ts';
 import { newId } from '../lib/ids.ts';
@@ -13,11 +13,13 @@ import { publishJob } from './progress.ts';
 import { directDownload } from './downloads.ts';
 import * as ytdlp from './ytdlp.ts';
 import { ingestLocalFile } from './files.ts';
+import { flushChunkToTelegram } from './chunkstore.ts';
 import { sanitizeFileName } from '../lib/paths.ts';
 
 export const JobType = {
   DirectUrl: 'download_url',
   Media: 'download_media',
+  FlushTelegram: 'flush_telegram',
 } as const;
 
 interface DownloadPayload {
@@ -71,6 +73,20 @@ export function enqueueDownload(input: {
     type: input.mode === 'media' ? JobType.Media : JobType.DirectUrl,
     payload,
     title: input.title ?? input.name ?? input.url,
+    max_attempts: cfg.queue.jobMaxAttempts,
+  });
+  publishJob(job);
+  return job;
+}
+
+/** مهمة رفع قطع ملف من الكاش إلى Telegram (التخزين الدائم). */
+export function enqueueFlush(userId: string, fileId: string, title: string): JobRow {
+  const cfg = loadConfig();
+  const job = Jobs.create({
+    user_id: userId,
+    type: JobType.FlushTelegram,
+    payload: { fileId },
+    title,
     max_attempts: cfg.queue.jobMaxAttempts,
   });
   publishJob(job);
@@ -150,6 +166,12 @@ async function runJob(job: JobRow): Promise<void> {
 
   try {
     if (Jobs.isCancelRequested(job.id)) throw new Error('CANCELED');
+
+    if (job.type === JobType.FlushTelegram) {
+      await runFlush(job, controller.signal, emit);
+      return;
+    }
+
     const payload = JSON.parse(job.payload) as DownloadPayload;
     await mkdir(workDir, { recursive: true });
 
@@ -231,7 +253,8 @@ async function runJob(job: JobRow): Promise<void> {
 
     Jobs.complete(job.id, { fileId: file.id }, file.id);
     publishJob(Jobs.findById(job.id)!);
-    log.info({ jobId: job.id, fileId: file.id }, 'اكتملت مهمة التحميل');
+    if (file.backend === 'telegram') enqueueFlush(job.user_id, file.id, suggestedName ?? file.name);
+    log.info({ jobId: job.id, fileId: file.id, backend: file.backend }, 'اكتملت مهمة التحميل');
   } catch (e) {
     const canceled = controller.signal.aborted || (e instanceof Error && e.message === 'CANCELED') || Jobs.isCancelRequested(job.id);
     if (canceled) {
@@ -258,6 +281,38 @@ async function runJob(job: JobRow): Promise<void> {
     active.delete(job.id);
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+async function runFlush(
+  job: JobRow,
+  signal: AbortSignal,
+  emit: (patch: Parameters<typeof Jobs.progress>[1]) => void,
+): Promise<void> {
+  const { fileId } = JSON.parse(job.payload) as { fileId: string };
+  const file = Files.findById(fileId);
+  if (!file) throw new Error('الملف غير موجود للرفع الدائم.');
+
+  const all = FileChunks.listByFile(fileId);
+  const pending = all.filter((c) => !c.tg_file_id);
+  const total = Math.max(1, all.length);
+  let done = total - pending.length;
+
+  for (const c of pending) {
+    if (signal.aborted || Jobs.isCancelRequested(job.id)) throw new Error('CANCELED');
+    await flushChunkToTelegram(file, c, signal);
+    done++;
+    emit({
+      stage: 'رفع إلى التخزين الدائم',
+      progress: Math.min(99, (done / total) * 100),
+      total_bytes: file.size,
+      done_bytes: Math.round(file.size * (done / total)),
+    });
+  }
+
+  Files.update(fileId, { status: 'ready' });
+  Jobs.complete(job.id, { fileId }, fileId);
+  publishJob(Jobs.findById(job.id)!);
+  getLogger().info({ jobId: job.id, fileId }, 'اكتمل الرفع إلى Telegram');
 }
 
 async function workerLoop(): Promise<void> {
