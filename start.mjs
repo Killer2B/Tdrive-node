@@ -1,19 +1,19 @@
 // مشغّل بيئة Node المغلقة (HidenCloud/Pterodactyl): يهيّئ الأدوات ثم يشغّل الخادم من TypeScript
-// مباشرةً عبر تجريد الأنواع في Node (بلا خطوة بناء). الأمر في اللوحة: node scripts/launch.mjs
+// مباشرةً عبر تجريد الأنواع في Node (بلا خطوة بناء). الأمر في اللوحة: node start.mjs
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { provision } from './provision.mjs';
+import { provision } from './scripts/provision.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const entry = path.resolve(here, '../src/index.ts');
+const entry = path.resolve(here, 'src', 'index.ts');
 const BIN = path.resolve(process.cwd(), 'bin');
 
 const [major, minor] = process.versions.node.split('.').map((n) => Number(n));
 if (major < 22 || (major === 22 && minor < 6)) {
   process.stderr.write(
-    `\n[launch] إصدار Node ${process.versions.node} غير مدعوم. اختر Node 24 (مفضّل) أو 22.6+ في لوحة الاستضافة.\n\n`,
+    `\n[start] إصدار Node ${process.versions.node} غير مدعوم. اختر Node 24 (مفضّل) أو 22.6+ في لوحة الاستضافة.\n\n`,
   );
   process.exit(1);
 }
@@ -23,7 +23,7 @@ async function main() {
   try {
     await provision();
   } catch (e) {
-    process.stderr.write(`[launch] تحذير: فشلت تهيئة الأدوات: ${String(e)}\n`);
+    process.stderr.write(`[start] تحذير: فشلت تهيئة الأدوات: ${String(e)}\n`);
   }
 
   // وجّه التطبيق إلى الثنائيّات المحلّية إن وُجدت (دون تجاوز قيم مضبوطة صراحةً)

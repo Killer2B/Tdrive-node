@@ -12,7 +12,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
-    "host": "node scripts/launch.mjs",
+    "host": "node start.mjs",
     "provision": "node scripts/provision.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",

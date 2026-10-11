@@ -158,11 +158,11 @@ docker compose up -d --build
 1. **ارفع المشروع** إلى الخادم (Git أو مدير الملفّات). في اللوحة اختر **Node.js** و**إصدار Node 24**
    (أو 22.6+). مرحلة التثبيت تنفّذ `npm install` (تُثبَّت الحزم؛ وبدائل node:sqlite/scrypt تعمل لو تعذّر
    بناء الوحدات الأصلية).
-2. **أمر التشغيل (Startup Command):**
-   ```
-   node scripts/launch.mjs
-   ```
-   يهيّئ `./bin/yt-dlp` و`./bin/ffmpeg` (idempotent)، ثم يشغّل الخادم بالأعلام المناسبة لإصدار Node.
+ 2. **أمر التشغيل (Startup Command):**
+    ```
+    node start.mjs
+    ```
+    يهيّئ `./bin/yt-dlp` و`./bin/ffmpeg` (idempotent)، ثم يشغّل الخادم بالأعلام المناسبة لإصدار Node.
 3. **الإعدادات:** أنشئ ملف `.env` في جذر الخادم (انسخ من `.env.host.example`) واملأ: `SESSION_SECRET`،
    `OWNER_PASSWORD`، `TG_BOT_TOKEN`، `TG_CHAT_ID`، و`PUBLIC_URL=https://tdrive.cc.cd`. اترك `PORT`
    فارغًا ليُؤخذ من `SERVER_PORT`، أو اضبطه على منفذ اللوحة (**24600**). `HOST=0.0.0.0`.
