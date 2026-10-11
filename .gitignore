@@ -1,0 +1,27 @@
+# deps / build
+node_modules/
+dist/
+web/dist/
+web/node_modules/
+
+# runtime data (storage + sqlite)
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# env & secrets
+.env
+.env.local
+.env.*.local
+
+# logs / tmp
+*.log
+tmp/
+.tmp/
+.DS_Store
+
+# tool binaries fetched at runtime
+bin/yt-dlp
+bin/yt-dlp.exe
