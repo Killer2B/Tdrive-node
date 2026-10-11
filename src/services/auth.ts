@@ -1,27 +1,10 @@
-/** المصادقة: تجزئة كلمة المرور (argon2id)، تهيئة المالك، وإدارة الجلسات. */
-import argon2 from 'argon2';
+/** المصادقة: تجزئة كلمة المرور، تهيئة المالك، وإدارة الجلسات. */
 import { Users, Sessions, type UserRow } from '../db/repo.ts';
 import { loadConfig } from '../config/env.ts';
 import { getLogger } from '../lib/logger.ts';
+import { hashPassword, verifyPassword } from '../lib/password.ts';
 
-const hashOptions: argon2.Options = {
-  type: argon2.argon2id,
-  memoryCost: 19456, // 19 MB
-  timeCost: 2,
-  parallelism: 1,
-};
-
-export async function hashPassword(password: string): Promise<string> {
-  return argon2.hash(password, hashOptions);
-}
-
-export async function verifyPassword(hash: string, password: string): Promise<boolean> {
-  try {
-    return await argon2.verify(hash, password);
-  } catch {
-    return false;
-  }
-}
+export { hashPassword, verifyPassword };
 
 /** يُنشئ حساب المالك عند أول تشغيل إن لم يوجد أي مستخدم. */
 export async function ensureOwner(): Promise<void> {
@@ -63,8 +46,8 @@ export async function login(
 ): Promise<LoginResult | null> {
   const user = Users.findByUsername(username);
   if (!user) {
-    // قارن ضدّ تجزئة وهمية لتقليل فرق التوقيت (تعداد المستخدمين)
-    await verifyPassword('$argon2id$v=19$m=19456,t=2,p=1$aaaaaaaaaaaaaaaaaaaaaa$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', password);
+    // ساوِ زمن الاستجابة بتكلفة تجزئة مكافئة لتقليل تسريب تعداد المستخدمين
+    await hashPassword(password);
     return null;
   }
   const ok = await verifyPassword(user.password_hash, password);

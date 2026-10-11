@@ -89,7 +89,7 @@ export function createRangeStream(
       yield buf.subarray(sliceStart, sliceEnd + 1);
     }
   }
-  return Readable.from(gen());
+  return Readable.from(gen(), { objectMode: false });
 }
 
 /** يرفع قطعة واحدة من الكاش إلى Telegram ويسجّل المرجع. */

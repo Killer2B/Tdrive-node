@@ -36,7 +36,7 @@ async function serveFile(
   file: FileRow,
   opts: { attachment: boolean },
 ): Promise<unknown> {
-  if (file.status !== 'ready' || !file.storage_key) throw errors.notFound('الملف غير جاهز بعد.');
+  if (file.status !== 'ready' && file.status !== 'processing') throw errors.notFound('الملف غير جاهز بعد.');
   const mime = file.mime ?? mimeForName(file.name);
   const etag = etagFor(file);
   const inline = !opts.attachment && isInlineSafe(mime);
@@ -60,14 +60,14 @@ async function serveFile(
   }
   if (r.type === 'ok') {
     const { start, end } = r.range;
-    const stream = await openFileRange(file, { start, end });
+    const { stream } = await openFileRange(file, { start, end });
     return reply
       .code(206)
       .header('Content-Range', `bytes ${start}-${end}/${file.size}`)
       .header('Content-Length', end - start + 1)
       .send(stream);
   }
-  const stream = await openFileRange(file);
+  const { stream } = await openFileRange(file);
   return reply.header('Content-Length', file.size).send(stream);
 }
 
