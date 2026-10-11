@@ -34,7 +34,6 @@ export async function buildServer(): Promise<FastifyInstance> {
     loggerInstance: getLogger(),
     trustProxy: true,
     bodyLimit: 2 * 1024 * 1024, // 2MB لأجسام JSON؛ أجزاء الرفع تُعالَج كتدفّق octet-stream
-    disableRequestLogging: false,
   });
 
   await registerSecurity(app);
