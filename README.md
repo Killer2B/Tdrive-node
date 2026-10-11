@@ -156,13 +156,15 @@ docker compose up -d --build
 `yt-dlp`/`ffmpeg` كثنائيّات arm64 داخل `./bin` تلقائيًّا.
 
 1. **ارفع المشروع** إلى الخادم (Git أو مدير الملفّات). في اللوحة اختر **Node.js** و**إصدار Node 24**
-   (أو 22.6+). مرحلة التثبيت تنفّذ `npm install` (تُثبَّت الحزم؛ وبدائل node:sqlite/scrypt تعمل لو تعذّر
-   بناء الوحدات الأصلية).
- 2. **أمر التشغيل (Startup Command):**
-    ```
-    node start.mjs
-    ```
-    يهيّئ `./bin/yt-dlp` و`./bin/ffmpeg` (idempotent)، ثم يشغّل الخادم بالأعلام المناسبة لإصدار Node.
+   (أو 22.6+). مرحلة التثبيت تنفّذ `npm install`. ملاحظة: اللوحة تحظر سكربتات بناء الوحدات الأصلية
+   (`better-sqlite3`/`argon2`)؛ لا مشكلة — التطبيق يسقط تلقائيًّا إلى `node:sqlite` و`scrypt` المدمجين.
+2. **ملف التشغيل (MAIN_FILE):** اضبط متغيّر `MAIN_FILE` في اللوحة على:
+   ```
+   start.js
+   ```
+   يجب أن ينتهي بـ `.js` حتى تشغّله اللوحة بـ `node` (لو كان بامتداد آخر تستخدم اللوحة `ts-node` ونحن
+   لا نريده). `start.js` يهيّئ `./bin/yt-dlp` و`./bin/ffmpeg` (idempotent) ثم يشغّل الخادم من TypeScript
+   عبر تجريد الأنواع في Node مع إضافة أعلام `node:sqlite`/strip عند اللزوم تلقائيًّا. اترك `NODE_ARGS` فارغًا.
 3. **الإعدادات:** أنشئ ملف `.env` في جذر الخادم (انسخ من `.env.host.example`) واملأ: `SESSION_SECRET`،
    `OWNER_PASSWORD`، `TG_BOT_TOKEN`، `TG_CHAT_ID`، و`PUBLIC_URL=https://tdrive.cc.cd`. اترك `PORT`
    فارغًا ليُؤخذ من `SERVER_PORT`، أو اضبطه على منفذ اللوحة (**24600**). `HOST=0.0.0.0`.
@@ -171,6 +173,8 @@ docker compose up -d --build
    (تُقدَّم من نفس الخادم). بدونها يعمل الـ API وصفحة بديلة على `/`.
 
 **ملاحظات ملائمة للموارد:**
+- **AUTO_UPDATE / git pull:** ملفّات `package-lock.json` خارج Git (مُتجاهَلة) حتى لا يتعارض `git pull`
+  التلقائيّ مع النسخة التي يولّدها `npm install` على الخادم.
 - القرص 15GB: الملف يُنزَّل كاملًا مؤقّتًا قبل تقطيعه ورفعه إلى Telegram، لذا `.env.host.example` يضبط
   `MAX_FILE_SIZE_GB=8`، `DOWNLOAD_CONCURRENCY=1`، و`CACHE_CAP_GB=3` ليبقى ضمن القرص. المحتوى الدائم
   على Telegram فالقرص لا يمتلئ.

@@ -4,6 +4,10 @@ dist/
 web/dist/
 web/node_modules/
 
+# lockfiles تُولَّد لكل بيئة؛ إبقاؤها خارج Git يمنع تعارض git pull التلقائيّ (AUTO_UPDATE)
+package-lock.json
+web/package-lock.json
+
 # runtime data (storage + sqlite)
 data/
 *.sqlite
