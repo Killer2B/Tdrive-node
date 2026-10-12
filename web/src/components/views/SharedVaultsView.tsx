@@ -405,7 +405,7 @@ export const SharedVaultsView: React.FC<SharedVaultsViewProps> = ({
               Zero-Knowledge Verification Active
             </span>
             <button
-              onClick={() => alert("All 24 outbound nodes audit passed with clean Merkle signature.")}
+              onClick={() => undefined}
               className="text-primary hover:text-secondary-fixed transition-colors cursor-pointer"
             >
               Audit All Outbound Nodes →

@@ -4,13 +4,10 @@
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ViewMode, FileItem, ExternalLink, ActiveTransfer, ClientNode } from './types';
-import {
-  INITIAL_SHARED_VAULTS,
-  INITIAL_EXTERNAL_LINKS,
-  INITIAL_CLIENT_NODES,
-} from './data/mockData';
+import { INITIAL_SHARED_VAULTS } from './data/mockData';
 import * as api from './api';
 import { Login } from './components/Login';
+import { PublicShare } from './components/PublicShare';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { OverviewView } from './components/views/OverviewView';
@@ -31,6 +28,12 @@ import { ToastContainer, ToastMessage } from './components/Toast';
 type AuthState = 'checking' | 'out' | 'in';
 
 export default function App() {
+  // مسار المشاركة العامّة لا يتطلّب تسجيل دخول
+  const pathname = window.location.pathname;
+  if (pathname.startsWith('/s/')) {
+    return <PublicShare token={decodeURIComponent(pathname.slice(3))} />;
+  }
+
   const [authState, setAuthState] = useState<AuthState>('checking');
   const [username, setUsername] = useState('المالك');
 
@@ -38,9 +41,9 @@ export default function App() {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [trashItems, setTrashItems] = useState<FileItem[]>([]);
   const [sharedVaults] = useState(INITIAL_SHARED_VAULTS);
-  const [externalLinks, setExternalLinks] = useState<ExternalLink[]>(INITIAL_EXTERNAL_LINKS);
+  const [externalLinks, setExternalLinks] = useState<ExternalLink[]>([]);
   const [transfers, setTransfers] = useState<ActiveTransfer[]>([]);
-  const [clientNodes, setClientNodes] = useState<ClientNode[]>(INITIAL_CLIENT_NODES);
+  const [clientNodes, setClientNodes] = useState<ClientNode[]>([]);
 
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
   const [storageUsedTB, setStorageUsedTB] = useState<number>(0);
@@ -48,7 +51,7 @@ export default function App() {
   const [viewLayout, setViewLayout] = useState<'grid' | 'list'>('grid');
 
   const [isShareDrawerOpen, setIsShareDrawerOpen] = useState(false);
-  const [shareTargetName, setShareTargetName] = useState<string>('');
+  const [shareTarget, setShareTarget] = useState<{ fileId?: string; name?: string }>({});
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isDeduplicationOpen, setIsDeduplicationOpen] = useState(false);
   const [isZeroOutOpen, setIsZeroOutOpen] = useState(false);
@@ -108,6 +111,8 @@ export default function App() {
   useEffect(() => {
     if (authState !== 'in') return;
     void reloadFiles();
+    api.shares.list().then((r) => setExternalLinks(r.links)).catch(() => {});
+    api.sessions.list().then((r) => setClientNodes(r.nodes)).catch(() => {});
     (async () => {
       try {
         const { jobs } = await api.downloads.jobs('active');
@@ -179,12 +184,17 @@ export default function App() {
     addToast(next ? 'أُضيف للمفضّلة' : 'أُزيل من المفضّلة', file?.name);
   };
 
-  // ===== مشاركات (زخرفيّة محليًّا) =====
+  // ===== المشاركات (حقيقية عبر الـ API) =====
+  const openShare = (target?: { fileId?: string; name?: string }) => {
+    setShareTarget(target ?? {});
+    setIsShareDrawerOpen(true);
+  };
   const handleLinkCreated = (newLink: ExternalLink) => {
     setExternalLinks((prev) => [newLink, ...prev]);
     addToast('أُنشئت المشاركة', newLink.vanityEndpoint);
   };
-  const handleRevokeLink = (id: string) => {
+  const handleRevokeLink = async (id: string) => {
+    await api.shares.revoke(id).catch(() => {});
     setExternalLinks((prev) => prev.map((l) => (l.id === id ? { ...l, isRevoked: true } : l)));
     addToast('أُلغيت المشاركة', undefined, 'error');
   };
@@ -242,10 +252,7 @@ export default function App() {
               files={files}
               transfers={transfers}
               onOpenUpload={() => setIsUploadOpen(true)}
-              onOpenCreateShare={() => {
-                setShareTargetName('مشاركة جديدة');
-                setIsShareDrawerOpen(true);
-              }}
+              onOpenCreateShare={() => openShare()}
               onSelectFile={(f) => setSelectedFile(f)}
               onDownloadFile={handleDownloadFile}
               onCopyFileLink={(f) => handleCopy(`${location.origin}/f/${f.id}`, f.name)}
@@ -264,10 +271,7 @@ export default function App() {
               onDeleteFiles={handleDeleteFiles}
               onDownloadFile={handleDownloadFile}
               onOpenUpload={() => setIsUploadOpen(true)}
-              onOpenCreateShare={(name) => {
-                setShareTargetName(name || '');
-                setIsShareDrawerOpen(true);
-              }}
+              onOpenCreateShare={(t) => openShare(t)}
               onCopyChecksum={(hash) => handleCopy(hash, 'البصمة SHA-256')}
               onRestoreVersion={(v) => addToast('استُعيدت النسخة', v)}
             />
@@ -277,10 +281,7 @@ export default function App() {
             <SharedVaultsView
               vaults={sharedVaults}
               links={externalLinks}
-              onOpenCreateShare={() => {
-                setShareTargetName('مشاركة جديدة');
-                setIsShareDrawerOpen(true);
-              }}
+              onOpenCreateShare={() => openShare()}
               onRevokeLink={handleRevokeLink}
               onCopyLink={(url) => handleCopy(url, 'رابط المشاركة')}
               onExportAuditCsv={() => addToast('تصدير السجلّ', 'CSV')}
@@ -290,7 +291,8 @@ export default function App() {
           {currentView === 'security-access' && (
             <SecurityAuditView
               clientNodes={clientNodes}
-              onRevokeNode={(nodeId) => {
+              onRevokeNode={async (nodeId) => {
+                await api.sessions.revoke(nodeId).catch(() => {});
                 setClientNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, isRevoked: true } : n)));
                 addToast('أُلغيت الجلسة', undefined, 'warning');
               }}
@@ -314,10 +316,7 @@ export default function App() {
               }}
               onToggleStar={handleToggleStar}
               onDownloadFile={handleDownloadFile}
-              onOpenCreateShare={(name) => {
-                setShareTargetName(name || '');
-                setIsShareDrawerOpen(true);
-              }}
+              onOpenCreateShare={(t) => openShare(t)}
             />
           )}
 
@@ -340,7 +339,7 @@ export default function App() {
         isOpen={isShareDrawerOpen}
         onClose={() => setIsShareDrawerOpen(false)}
         onCreated={handleLinkCreated}
-        defaultTarget={shareTargetName}
+        target={shareTarget}
       />
 
       <UploadModal
@@ -382,7 +381,7 @@ export default function App() {
         }}
         onChangeView={(v) => setCurrentView(v)}
         onOpenUpload={() => setIsUploadOpen(true)}
-        onOpenCreateShare={() => setIsShareDrawerOpen(true)}
+        onOpenCreateShare={() => openShare()}
       />
     </div>
   );

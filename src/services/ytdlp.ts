@@ -48,15 +48,29 @@ interface RawInfo {
   formats?: RawFormat[];
 }
 
+/** وسائط مشتركة: كوكيز YouTube (لتجاوز فحص الروبوت على الخوادم) + وسائط إضافية من الإعداد. */
+function commonArgs(): string[] {
+  const cfg = loadConfig();
+  const a: string[] = [];
+  if (cfg.tools.cookies) a.push('--cookies', cfg.tools.cookies);
+  if (cfg.tools.extraArgs.length) a.push(...cfg.tools.extraArgs);
+  return a;
+}
+
 /** يجلب بيانات الرابط الوصفية (عنوان/مدّة/جودات) دون تنزيل. */
 export async function probe(url: string, signal?: AbortSignal): Promise<YtProbe> {
   const cfg = loadConfig();
   const { stdout, code, stderr } = await runCapture(
     cfg.tools.ytdlpPath,
-    ['-J', '--no-playlist', '--no-warnings', '--', url],
+    ['-J', '--no-playlist', '--no-warnings', ...commonArgs(), '--', url],
     { timeoutMs: 45_000, signal },
   );
-  if (code !== 0) throw new Error(`yt-dlp فشل في قراءة الرابط: ${stderr.slice(0, 500)}`);
+  if (code !== 0) {
+    const hint = /Sign in to confirm|not a bot|cookies/i.test(stderr)
+      ? ' (يوتيوب يطلب تأكيد الحساب على هذا الخادم — أضف ملف كوكيز عبر YTDLP_COOKIES)'
+      : '';
+    throw new Error(`yt-dlp فشل في قراءة الرابط${hint}: ${stderr.slice(0, 500)}`);
+  }
   const info = JSON.parse(stdout) as RawInfo;
 
   const qualities: YtQuality[] = [];
@@ -139,6 +153,7 @@ export async function download(
   if (cfg.tools.ffmpegPath && cfg.tools.ffmpegPath !== 'ffmpeg') {
     args.push('--ffmpeg-location', cfg.tools.ffmpegPath);
   }
+  args.push(...commonArgs());
   args.push('--', url);
 
   return new Promise<DownloadResult>((resolve, reject) => {
@@ -184,9 +199,11 @@ export async function download(
       rl.close();
       if (opts.signal?.aborted) return reject(new Error('أُلغي التحميل'));
       if (code !== 0) {
-        const msg = /DRM|protected|unavailable|Private video|Sign in/i.test(stderr)
-          ? 'تعذّر التحميل: المحتوى محميّ (DRM) أو خاص أو غير متاح.'
-          : `فشل التحميل (رمز ${code}). ${stderr.slice(-300)}`;
+        const msg = /Sign in to confirm|not a bot/i.test(stderr)
+          ? 'يوتيوب يطلب تأكيد الحساب على هذا الخادم. أضف ملف كوكيز عبر YTDLP_COOKIES ثم أعد المحاولة.'
+          : /DRM|protected|unavailable|Private video|members-only|Sign in/i.test(stderr)
+            ? 'تعذّر التحميل: المحتوى محميّ (DRM) أو خاص أو غير متاح.'
+            : `فشل التحميل (رمز ${code}). ${stderr.slice(-300)}`;
         return reject(new Error(msg));
       }
       if (!finalPath) {

@@ -137,7 +137,7 @@ export const OverviewView: React.FC<OverviewViewProps> = ({
               <span>Create Shared Vault</span>
             </button>
             <button
-              onClick={() => alert("External File Request link created: vaulta.to/req/acme-ingress-drop")}
+                onClick={() => undefined}
               type="button"
               className="flex items-center gap-2 px-4 py-2 rounded-lg bg-surface-container hover:bg-surface-container-high text-on-surface text-sm transition-all shadow-sm cursor-pointer"
             >

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { FileItem, FileCategory } from '../../types';
 import { VIDEO_PREVIEW_IMG } from '../../data/mockData';
 import * as api from '../../api';
+import { VideoPlayer } from '../VideoPlayer';
 
 interface AllFilesViewProps {
   files: FileItem[];
@@ -10,7 +11,7 @@ interface AllFilesViewProps {
   onDeleteFiles: (ids: string[]) => void;
   onDownloadFile: (file: FileItem) => void;
   onOpenUpload: () => void;
-  onOpenCreateShare: (targetName?: string) => void;
+  onOpenCreateShare: (target?: { fileId?: string; name?: string }) => void;
   onCopyChecksum: (hash: string) => void;
   onRestoreVersion: (version: string) => void;
 }
@@ -101,7 +102,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => alert("Audit log verified: Latest Merkle block synchronized across 3 regions.")}
+                onClick={() => undefined}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-mono rounded shadow-sm transition-all cursor-pointer"
           >
             <span className="material-symbols-outlined text-base">lock_open</span>
@@ -201,7 +202,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => onOpenCreateShare(activeInspectionFile.name)}
+                onClick={() => onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name })}
                 className="flex items-center gap-1 px-2 py-0.5 rounded text-on-surface hover:bg-surface-bright font-mono text-xs transition-colors"
                 title="Share link"
               >
@@ -459,7 +460,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
               <div className="flex items-center gap-1">
                 <button
                   type="button"
-                  onClick={() => alert(`Enclave URI: ${activeInspectionFile.path}`)}
+                  onClick={() => window.open(api.files.streamUrl(activeInspectionFile.id), '_blank')}
                   className="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container transition-colors"
                   title="Open Fullscreen Viewport"
                 >
@@ -478,24 +479,21 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
 
             <div className="flex-1 overflow-y-auto p-4 space-y-6">
               {/* Media Preview Frame with Scrub Simulator */}
-              <div className="relative rounded-xl overflow-hidden bg-surface-container-lowest border border-white/5 shadow-md group">
+              <div className="relative rounded-xl overflow-hidden group">
                 {activeInspectionFile.type === 'video' ? (
-                  <video
+                  <VideoPlayer
                     key={activeInspectionFile.id}
                     src={api.files.streamUrl(activeInspectionFile.id)}
                     poster={activeInspectionFile.previewUrl || VIDEO_PREVIEW_IMG}
-                    controls
-                    preload="metadata"
-                    className="w-full h-44 object-contain bg-black"
                   />
                 ) : activeInspectionFile.type === 'design' ? (
                   <img
                     src={api.files.streamUrl(activeInspectionFile.id)}
                     alt={activeInspectionFile.name}
-                    className="w-full h-44 object-cover object-center"
+                    className="w-full max-h-72 object-contain bg-black rounded-xl border border-white/10"
                   />
                 ) : (
-                  <div className="w-full h-44 flex items-center justify-center text-outline bg-surface-container-lowest">
+                  <div className="w-full h-44 flex items-center justify-center text-outline bg-surface-container-lowest rounded-xl border border-white/5">
                     <span className="material-symbols-outlined text-5xl">
                       {activeInspectionFile.type === 'doc'
                         ? 'description'
@@ -509,7 +507,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                     </span>
                   </div>
                 )}
-                <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container-lowest/80 backdrop-blur-md text-[10px] font-mono text-secondary-fixed pointer-events-none">
+                <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container-lowest/80 backdrop-blur-md text-[10px] font-mono text-secondary-fixed pointer-events-none">
                   <span className="w-1.5 h-1.5 rounded-full bg-secondary-container"></span>
                   {activeInspectionFile.extension?.toUpperCase() || 'FILE'}
                 </div>
@@ -534,7 +532,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => onOpenCreateShare(activeInspectionFile.name)}
+                    onClick={() => onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name })}
                     className="flex items-center justify-center gap-1.5 py-2 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface font-mono text-xs rounded border border-white/5 transition-colors cursor-pointer"
                   >
                     <span className="material-symbols-outlined text-base">share</span>
@@ -585,7 +583,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                   <span className="font-mono text-xs text-outline uppercase tracking-wider">Access & Permissions</span>
                   <button
                     type="button"
-                    onClick={() => onOpenCreateShare(activeInspectionFile.name)}
+                    onClick={() => onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name })}
                     className="text-primary text-xs font-mono hover:underline cursor-pointer"
                   >
                     + Manage

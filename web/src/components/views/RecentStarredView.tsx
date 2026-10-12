@@ -6,7 +6,7 @@ interface RecentStarredViewProps {
   onSelectFile: (file: FileItem) => void;
   onToggleStar: (fileId: string) => void;
   onDownloadFile: (file: FileItem) => void;
-  onOpenCreateShare: (targetName?: string) => void;
+  onOpenCreateShare: (target?: { fileId?: string; name?: string }) => void;
 }
 
 export const RecentStarredView: React.FC<RecentStarredViewProps> = ({
@@ -118,7 +118,7 @@ export const RecentStarredView: React.FC<RecentStarredViewProps> = ({
               <div className="flex items-center gap-2 opacity-80 group-hover:opacity-100 transition-opacity">
                 <button
                   type="button"
-                  onClick={(e) => { e.stopPropagation(); onOpenCreateShare(file.name); }}
+                  onClick={(e) => { e.stopPropagation(); onOpenCreateShare({ fileId: file.id, name: file.name }); }}
                   className="p-2 rounded hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface transition-colors"
                   title="Share"
                 >

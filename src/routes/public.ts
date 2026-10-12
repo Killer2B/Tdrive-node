@@ -1,0 +1,77 @@
+/** مسارات المشاركة العامّة (بلا مصادقة): معاينة وبثّ وتنزيل الملف المشارَك مع ضوابطه. */
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { errors } from '../lib/errors.ts';
+import { Shares, Files, type ShareRow, type FileRow } from '../db/repo.ts';
+import { verifyPassword } from '../lib/password.ts';
+import { isInlineSafe, mimeForName } from '../services/files.ts';
+import { serveFileRange } from './_serve.ts';
+
+function pwOf(request: FastifyRequest): string | undefined {
+  const q = (request.query as { pw?: string }).pw;
+  const h = request.headers['x-share-password'];
+  return q ?? (typeof h === 'string' ? h : undefined);
+}
+
+/** يتحقّق من صلاحية المشاركة ويعيد (المشاركة، الملف) أو يرمي خطأً مناسبًا. */
+async function resolveShare(token: string, pw?: string): Promise<{ share: ShareRow; file: FileRow }> {
+  const share = Shares.findByToken(token);
+  if (!share || share.revoked) throw errors.notFound('الرابط غير صالح أو مُلغى.');
+  if (share.expires_at && share.expires_at < Date.now()) throw errors.notFound('انتهت صلاحية الرابط.');
+  if (share.max_downloads && share.download_count >= share.max_downloads) {
+    throw errors.forbidden('استُنفد الحدّ الأقصى لتنزيلات هذا الرابط.');
+  }
+  if (share.password_hash) {
+    if (!pw || !(await verifyPassword(share.password_hash, pw))) {
+      throw errors.unauthorized('هذا الرابط محميّ بكلمة مرور.');
+    }
+  }
+  const file = share.file_id ? Files.findById(share.file_id) : undefined;
+  if (!file) throw errors.notFound('الملف المشارَك لم يعد موجودًا.');
+  return { share, file };
+}
+
+export default async function publicRoutes(app: FastifyInstance): Promise<void> {
+  app.get('/api/public/:token/meta', { config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request) => {
+    const token = (request.params as { token: string }).token;
+    const share = Shares.findByToken(token);
+    if (!share || share.revoked) return { ok: false, reason: 'notfound', hasPassword: false };
+    if (share.expires_at && share.expires_at < Date.now()) return { ok: false, reason: 'expired', hasPassword: !!share.password_hash };
+    if (share.max_downloads && share.download_count >= share.max_downloads) {
+      return { ok: false, reason: 'exhausted', hasPassword: !!share.password_hash };
+    }
+    const pw = pwOf(request);
+    if (share.password_hash && !(pw && (await verifyPassword(share.password_hash, pw)))) {
+      return { ok: false, needsPassword: true, hasPassword: true, wrong: !!pw };
+    }
+    const file = share.file_id ? Files.findById(share.file_id) : undefined;
+    if (!file) return { ok: false, reason: 'notfound', hasPassword: !!share.password_hash };
+
+    Shares.incViews(share.id);
+    const mime = file.mime ?? mimeForName(file.name);
+    return {
+      ok: true,
+      hasPassword: !!share.password_hash,
+      name: file.name,
+      type: file.type,
+      mime,
+      sizeBytes: file.size,
+      inline: isInlineSafe(mime),
+      isVideo: file.type === 'video',
+      isImage: file.type === 'design',
+    };
+  });
+
+  app.get('/api/public/:token/stream', async (request, reply) => {
+    const { token } = request.params as { token: string };
+    const { file } = await resolveShare(token, pwOf(request));
+    return serveFileRange(request, reply, file, { attachment: false });
+  });
+
+  app.get('/api/public/:token/download', async (request, reply) => {
+    const { token } = request.params as { token: string };
+    const { share, file } = await resolveShare(token, pwOf(request));
+    // احتسب تنزيلًا واحدًا عند بدء التنزيل (لا لكل طلب Range تكميليّ)
+    if (!request.headers.range) Shares.incDownloads(share.id);
+    return serveFileRange(request, reply, file, { attachment: true });
+  });
+}

@@ -82,6 +82,10 @@ const envSchema = z.object({
   FFMPEG_PATH: z.string().default('ffmpeg'),
   FFPROBE_PATH: z.string().default('ffprobe'),
   THUMBNAILS_ENABLED: boolish.default(true),
+  // ملف كوكيز (cookies.txt) لتجاوز "تأكيد أنك لست روبوتًا" في YouTube على خوادم الاستضافة
+  YTDLP_COOKIES: z.string().optional(),
+  // وسائط إضافية لـ yt-dlp مفصولة بمسافات (مثل: --extractor-args youtube:player_client=default)
+  YTDLP_EXTRA_ARGS: z.string().default(''),
 
   BACKUP_ENABLED: boolish.default(false),
   BACKUP_INTERVAL_HOURS: z.coerce.number().positive().default(18),
@@ -129,7 +133,7 @@ export interface Config {
     httpConnectTimeoutMs: number;
     httpIdleTimeoutMs: number;
   };
-  tools: { ytdlpPath: string; ffmpegPath: string; ffprobePath: string; thumbnailsEnabled: boolean };
+  tools: { ytdlpPath: string; ffmpegPath: string; ffprobePath: string; thumbnailsEnabled: boolean; cookies?: string; extraArgs: string[] };
   backup: {
     enabled: boolean;
     intervalHours: number;
@@ -220,6 +224,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ffmpegPath: e.FFMPEG_PATH,
       ffprobePath: e.FFPROBE_PATH,
       thumbnailsEnabled: e.THUMBNAILS_ENABLED,
+      cookies: e.YTDLP_COOKIES,
+      extraArgs: e.YTDLP_EXTRA_ARGS.split(/\s+/).filter(Boolean),
     },
     backup: {
       enabled: e.BACKUP_ENABLED,

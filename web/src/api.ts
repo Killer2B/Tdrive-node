@@ -2,7 +2,7 @@
  * عميل الـ API للواجهة: مصادقة، ملفّات، مجلّدات، رفع مجزّأ قابل للاستئناف،
  * تحميل من الروابط، وبثّ الأحداث (SSE). كل الطلبات بالكوكي (credentials: include).
  */
-import { FileItem, ActiveTransfer } from './types';
+import { FileItem, ActiveTransfer, ExternalLink, ClientNode } from './types';
 
 export interface ApiFile {
   id: string;
@@ -122,6 +122,52 @@ export const system = () =>
   req<{ ytdlp: { installed: boolean; version: string | null }; ffmpeg: { installed: boolean }; storageDriver: string; chunkSizeMB: number; maxFileSizeGB: number; backupEnabled: boolean }>(
     '/api/system',
   );
+
+// ===== المشاركات =====
+export const shares = {
+  create: (payload: { fileId: string; password?: string; expiresDays?: number; maxDownloads?: number; label?: string }) =>
+    req<{ link: ExternalLink }>('/api/shares', { method: 'POST', body: JSON.stringify(payload) }),
+  list: () => req<{ links: ExternalLink[] }>('/api/shares'),
+  revoke: (id: string) => req(`/api/shares/${id}/revoke`, { method: 'POST' }),
+  remove: (id: string) => req(`/api/shares/${id}`, { method: 'DELETE' }),
+};
+
+// ===== الجلسات/الأجهزة =====
+export const sessions = {
+  list: () => req<{ nodes: ClientNode[] }>('/api/sessions'),
+  revoke: (id: string) => req(`/api/sessions/${id}/revoke`, { method: 'POST' }),
+};
+
+// ===== الإعدادات =====
+export const settings = {
+  get: () => req<{ settings: Record<string, unknown> }>('/api/settings'),
+  save: (values: Record<string, unknown>) =>
+    req<{ settings: Record<string, unknown> }>('/api/settings', { method: 'PUT', body: JSON.stringify(values) }),
+};
+
+// ===== المشاركة العامّة (بلا تسجيل دخول) =====
+export interface PublicMeta {
+  ok: boolean;
+  reason?: string;
+  hasPassword: boolean;
+  needsPassword?: boolean;
+  wrong?: boolean;
+  name?: string;
+  type?: string;
+  mime?: string;
+  sizeBytes?: number;
+  inline?: boolean;
+  isVideo?: boolean;
+  isImage?: boolean;
+}
+export const publicShare = {
+  meta: (token: string, pw?: string) =>
+    req<PublicMeta>(`/api/public/${encodeURIComponent(token)}/meta${pw ? `?pw=${encodeURIComponent(pw)}` : ''}`),
+  streamUrl: (token: string, pw?: string) =>
+    `/api/public/${encodeURIComponent(token)}/stream${pw ? `?pw=${encodeURIComponent(pw)}` : ''}`,
+  downloadUrl: (token: string, pw?: string) =>
+    `/api/public/${encodeURIComponent(token)}/download${pw ? `?pw=${encodeURIComponent(pw)}` : ''}`,
+};
 
 // ===== الرفع المجزّأ القابل للاستئناف =====
 async function sha256Hex(buf: ArrayBuffer): Promise<string> {

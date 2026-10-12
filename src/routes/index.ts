@@ -5,19 +5,23 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { authGuard } from '../plugins/auth.ts';
 import authRoutes from './auth.ts';
+import publicRoutes from './public.ts';
 import fileRoutes from './files.ts';
 import folderRoutes from './folders.ts';
 import uploadRoutes from './uploads.ts';
 import downloadRoutes from './downloads.ts';
 import eventRoutes from './events.ts';
+import shareRoutes from './shares.ts';
+import sessionRoutes from './sessions.ts';
 import miscRoutes from './misc.ts';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // صحّة عامّة
   app.get('/health', async () => ({ status: 'ok', time: Date.now() }));
 
-  // عامّة (المصادقة)
+  // عامّة (المصادقة + روابط المشاركة العامّة بلا تسجيل دخول)
   await app.register(authRoutes);
+  await app.register(publicRoutes);
 
   // محميّة
   await app.register(async (secured) => {
@@ -27,6 +31,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await secured.register(uploadRoutes);
     await secured.register(downloadRoutes);
     await secured.register(eventRoutes);
+    await secured.register(shareRoutes);
+    await secured.register(sessionRoutes);
     await secured.register(miscRoutes);
   });
 

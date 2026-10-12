@@ -1,59 +1,52 @@
 import React, { useState } from 'react';
 import { ExternalLink } from '../../types';
+import * as api from '../../api';
 
 interface CreateShareDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   onCreated: (newLink: ExternalLink) => void;
-  defaultTarget?: string;
+  target?: { fileId?: string; name?: string };
 }
 
-export const CreateShareDrawer: React.FC<CreateShareDrawerProps> = ({
-  isOpen,
-  onClose,
-  onCreated,
-  defaultTarget = "Project_Titan_DueDiligence_2025"
-}) => {
-  const [vanity, setVanity] = useState("titan-advisory-2025");
+export const CreateShareDrawer: React.FC<CreateShareDrawerProps> = ({ isOpen, onClose, onCreated, target }) => {
+  const [vanity, setVanity] = useState('');
   const [watermark, setWatermark] = useState(true);
   const [steganography, setSteganography] = useState(true);
   const [burnAfterRead, setBurnAfterRead] = useState(false);
-  const [hasPassword, setHasPassword] = useState(true);
-  const [password, setPassword] = useState("••••••••••••••••");
-  const [ipFilter, setIpFilter] = useState("");
-  const [expiryDays, setExpiryDays] = useState("7 Days");
+  const [password, setPassword] = useState('');
+  const [ipFilter, setIpFilter] = useState('');
+  const [expiryDays, setExpiryDays] = useState('7 Days');
   const [isSealing, setIsSealing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
+    if (!target?.fileId) {
+      setError('اختر ملفًّا للمشاركة أولًا (من «الملفّات» ← زرّ المشاركة على الملف).');
+      return;
+    }
     setIsSealing(true);
-
-    setTimeout(() => {
-      setIsSealing(false);
-      const createdLink: ExternalLink = {
-        id: `link-${Date.now()}`,
-        targetName: defaultTarget,
-        targetPath: `/vaults/shares/${vanity}`,
-        targetType: 'folder',
-        vanityEndpoint: `vaulta.to/p/${vanity}`,
-        safeguards: [
-          ...(hasPassword ? [{ label: "Password", icon: "key" }] : []),
-          ...(watermark ? [{ label: "Watermark", icon: "water_drop", highlight: true }] : []),
-          ...(burnAfterRead ? [{ label: "Burn-on-Read", icon: "local_fire_department", highlight: true }] : []),
-          ...(ipFilter ? [{ label: "Domain IP", icon: "vpn_lock" }] : [{ label: "Zero-Knowledge", icon: "verified_user" }])
-        ],
-        quotaUsed: 0,
-        quotaLimit: burnAfterRead ? 1 : 50,
-        viewsCount: 0,
-        telemetryNote: "0 concurrent",
-        expiry: expiryDays === "24 Hours" ? "24h" : expiryDays === "7 Days" ? "7d" : expiryDays === "30 Days" ? "30d" : "Custom",
-        isRevoked: false
-      };
-      onCreated(createdLink);
+    try {
+      const expiresDays =
+        expiryDays === '24 Hours' ? 1 : expiryDays === '7 Days' ? 7 : expiryDays === '30 Days' ? 30 : undefined;
+      const res = await api.shares.create({
+        fileId: target.fileId,
+        password: password.trim() ? password.trim() : undefined,
+        expiresDays,
+        maxDownloads: burnAfterRead ? 1 : undefined,
+        label: target.name,
+      });
+      onCreated(res.link);
       onClose();
-    }, 1200);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'تعذّر إنشاء المشاركة');
+    } finally {
+      setIsSealing(false);
+    }
   };
 
   return (
@@ -91,12 +84,14 @@ export const CreateShareDrawer: React.FC<CreateShareDrawerProps> = ({
               <div className="flex items-center gap-3">
                 <span className="material-symbols-outlined text-primary text-2xl">folder_zip</span>
                 <div>
-                  <span className="text-sm font-medium text-on-surface block">{defaultTarget}</span>
-                  <span className="font-mono text-xs text-outline">18 items · 1.84 GB Encrypted Volume</span>
+                  <span className="text-sm font-medium text-on-surface block">{target?.name ?? 'لم يُحدَّد ملف'}</span>
+                  <span className="font-mono text-xs text-outline">
+                    {target?.fileId ? 'جاهز للمشاركة' : 'افتح ملفًّا من القائمة واضغط «مشاركة»'}
+                  </span>
                 </div>
               </div>
               <span className="font-mono text-xs text-secondary-fixed bg-surface-container-high px-2 py-0.5 rounded">
-                Mounted
+                {target?.fileId ? 'محدَّد' : '—'}
               </span>
             </div>
           </div>
@@ -242,6 +237,13 @@ export const CreateShareDrawer: React.FC<CreateShareDrawerProps> = ({
               ))}
             </div>
           </div>
+
+          {error && (
+            <div className="flex items-center gap-2 text-error text-sm bg-error-container/20 border border-error/20 rounded-lg px-3 py-2">
+              <span className="material-symbols-outlined text-base">error</span>
+              <span>{error}</span>
+            </div>
+          )}
 
           {/* Drawer Footer Actions */}
           <div className="p-5 bg-surface-container border-t border-white/5 flex items-center justify-between gap-4 -mx-6 -mb-6 mt-6">

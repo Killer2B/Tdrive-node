@@ -199,6 +199,11 @@ export const Sessions = {
   deleteAllForUser(user_id: string): void {
     getDb().prepare('DELETE FROM sessions WHERE user_id = ?').run(user_id);
   },
+  listByUser(user_id: string): SessionRow[] {
+    return getDb()
+      .prepare('SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC')
+      .all(user_id) as SessionRow[];
+  },
 };
 
 // ===== المجلّدات =====
@@ -754,6 +759,9 @@ export const Shares = {
   },
   incDownloads(id: string): void {
     getDb().prepare('UPDATE shares SET download_count = download_count + 1 WHERE id = ?').run(id);
+  },
+  delete(id: string): void {
+    getDb().prepare('DELETE FROM shares WHERE id = ?').run(id);
   },
 };
 

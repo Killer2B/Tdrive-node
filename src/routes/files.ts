@@ -1,21 +1,18 @@
 /** مسارات الملفّات: سرد/تفاصيل/تعديل/سلّة مهملات/حذف + بثّ Range وتنزيل وصورة مصغّرة. */
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { parse } from '../lib/validate.ts';
-import { parseRange } from '../lib/ranges.ts';
 import { errors } from '../lib/errors.ts';
 import { Files, Folders, type FileRow } from '../db/repo.ts';
 import { requireUser } from '../plugins/auth.ts';
+import { serveFileRange } from './_serve.ts';
 import {
   toApiFile,
-  openFileRange,
   openThumbnail,
   trashFile,
   restoreFile,
   deleteFilePermanent,
   storageUsage,
-  mimeForName,
-  isInlineSafe,
   uniqueName,
 } from '../services/files.ts';
 
@@ -24,51 +21,6 @@ function ownFile(request: FastifyRequest, id: string): FileRow {
   const file = Files.findById(id);
   if (!file || file.user_id !== user.id) throw errors.notFound('الملف غير موجود.');
   return file;
-}
-
-function etagFor(file: FileRow): string {
-  return `"${file.sha256 ?? `${file.id}-${file.size}-${file.updated_at}`}"`;
-}
-
-async function serveFile(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  file: FileRow,
-  opts: { attachment: boolean },
-): Promise<unknown> {
-  if (file.status !== 'ready' && file.status !== 'processing') throw errors.notFound('الملف غير جاهز بعد.');
-  const mime = file.mime ?? mimeForName(file.name);
-  const etag = etagFor(file);
-  const inline = !opts.attachment && isInlineSafe(mime);
-  const dispName = encodeURIComponent(file.name);
-
-  reply
-    .header('Content-Type', mime)
-    .header('Accept-Ranges', 'bytes')
-    .header('ETag', etag)
-    .header('Cache-Control', 'private, max-age=3600')
-    .header('X-Content-Type-Options', 'nosniff')
-    .header('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${dispName}`);
-
-  if (request.headers['if-none-match'] === etag) {
-    return reply.code(304).send();
-  }
-
-  const r = parseRange(request.headers.range, file.size);
-  if (r.type === 'unsatisfiable') {
-    return reply.code(416).header('Content-Range', `bytes */${file.size}`).send();
-  }
-  if (r.type === 'ok') {
-    const { start, end } = r.range;
-    const { stream } = await openFileRange(file, { start, end });
-    return reply
-      .code(206)
-      .header('Content-Range', `bytes ${start}-${end}/${file.size}`)
-      .header('Content-Length', end - start + 1)
-      .send(stream);
-  }
-  const { stream } = await openFileRange(file);
-  return reply.header('Content-Length', file.size).send(stream);
 }
 
 const listQuery = z.object({
@@ -157,12 +109,12 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/files/:id/stream', async (request, reply) => {
     const file = ownFile(request, (request.params as { id: string }).id);
-    return serveFile(request, reply, file, { attachment: false });
+    return serveFileRange(request, reply, file, { attachment: false });
   });
 
   app.get('/api/files/:id/download', async (request, reply) => {
     const file = ownFile(request, (request.params as { id: string }).id);
-    return serveFile(request, reply, file, { attachment: true });
+    return serveFileRange(request, reply, file, { attachment: true });
   });
 
   app.get('/api/files/:id/thumbnail', async (request, reply) => {

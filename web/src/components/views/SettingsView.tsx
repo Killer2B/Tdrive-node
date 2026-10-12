@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import * as api from '../../api';
 
 interface SettingsViewProps {
   onSaved: () => void;
@@ -10,10 +11,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
   const [watermarkTemplate, setWatermarkTemplate] = useState('{{user_email}} · {{ip_address}} · {{session_hash}} · {{timestamp}}');
   const [retentionDays, setRetentionDays] = useState('30');
   const [clusterRegion, setClusterRegion] = useState('eu-frankfurt');
+  const [saving, setSaving] = useState(false);
 
-  const handleSave = (e: React.FormEvent) => {
+  useEffect(() => {
+    api.settings
+      .get()
+      .then((r) => {
+        const s = r.settings as Record<string, string | boolean>;
+        if (typeof s.encryptionStandard === 'string') setEncryptionStandard(s.encryptionStandard);
+        if (typeof s.autoExpand === 'boolean') setAutoExpand(s.autoExpand);
+        if (typeof s.watermarkTemplate === 'string') setWatermarkTemplate(s.watermarkTemplate);
+        if (typeof s.retentionDays === 'string') setRetentionDays(s.retentionDays);
+        if (typeof s.clusterRegion === 'string') setClusterRegion(s.clusterRegion);
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    onSaved();
+    setSaving(true);
+    try {
+      await api.settings.save({ encryptionStandard, autoExpand, watermarkTemplate, retentionDays, clusterRegion });
+      onSaved();
+    } catch {
+      /* يتجاهل؛ onSaved لن يُستدعى عند الفشل */
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -175,9 +199,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
         <div className="flex items-center justify-end gap-3 pt-2">
           <button
             type="submit"
-            className="px-6 py-2.5 bg-primary-container hover:bg-secondary-container hover:text-on-secondary-fixed-variant text-on-primary-container font-mono text-xs font-semibold rounded-lg shadow-lg transition-all cursor-pointer"
+            disabled={saving}
+            className="px-6 py-2.5 bg-primary-container hover:bg-secondary-container hover:text-on-secondary-fixed-variant text-on-primary-container font-mono text-xs font-semibold rounded-lg shadow-lg transition-all cursor-pointer disabled:opacity-50"
           >
-            Save Enclave Configuration
+            {saving ? 'يحفظ…' : 'حفظ الإعدادات'}
           </button>
         </div>
       </form>
