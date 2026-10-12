@@ -65,15 +65,27 @@ export default async function downloadRoutes(app: FastifyInstance): Promise<void
           qualities: info.qualities,
         };
       } catch (e) {
-        // محاولة أخيرة كرابط مباشر
+        // محاولة أخيرة كرابط مباشر — لكن فقط إن كان ملفًّا فعليًّا (ليس صفحة HTML)
+        let direct: Awaited<ReturnType<typeof probeDirect>> | null = null;
         try {
-          const d = await probeDirect(url);
-          return { mode: 'direct', title: d.filename, filename: d.filename, sizeBytes: d.sizeBytes, contentType: d.contentType };
+          direct = await probeDirect(url);
         } catch {
-          throw errors.badGateway(
-            `تعذّرت قراءة الرابط. ${e instanceof Error ? e.message : ''}`.trim(),
-          );
+          direct = null;
         }
+        const ct = (direct?.contentType ?? '').toLowerCase();
+        const isRealFile =
+          !!direct && !!direct.contentType && !ct.startsWith('text/html') && !ct.startsWith('application/xhtml');
+        if (isRealFile) {
+          return {
+            mode: 'direct',
+            title: direct!.filename,
+            filename: direct!.filename,
+            sizeBytes: direct!.sizeBytes,
+            contentType: direct!.contentType,
+          };
+        }
+        // الرابط صفحة ويب لا ملف: أظهر سبب فشل yt-dlp الحقيقيّ (قد يطلب كوكيز)
+        throw errors.badGateway(e instanceof Error ? e.message : 'تعذّرت قراءة الرابط.');
       }
     }
 
