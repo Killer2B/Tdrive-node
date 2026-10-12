@@ -137,6 +137,14 @@ export const system = () =>
     '/api/system',
   );
 
+// ===== كوكيز يوتيوب =====
+export const ytCookies = {
+  status: () => req<{ present: boolean; path: string }>('/api/system/cookies'),
+  save: (content: string) =>
+    req<{ ok: boolean; present: boolean }>('/api/system/cookies', { method: 'POST', body: JSON.stringify({ content }) }),
+  clear: () => req<{ ok: boolean; present: boolean }>('/api/system/cookies', { method: 'DELETE' }),
+};
+
 // ===== المشاركات =====
 export const shares = {
   create: (payload: { fileId: string; password?: string; expiresDays?: number; maxDownloads?: number; label?: string }) =>

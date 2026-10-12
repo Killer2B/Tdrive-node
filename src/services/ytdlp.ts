@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { runCapture } from '../lib/spawn.ts';
 import { loadConfig } from '../config/env.ts';
@@ -48,11 +49,18 @@ interface RawInfo {
   formats?: RawFormat[];
 }
 
+/** مسار ملف كوكيز YouTube: من الإعداد YTDLP_COOKIES أو الافتراضيّ ./data/cookies.txt. */
+export function cookiesFilePath(): string {
+  const cfg = loadConfig();
+  return cfg.tools.cookies ?? path.resolve(process.cwd(), 'data', 'cookies.txt');
+}
+
 /** وسائط مشتركة: كوكيز YouTube (لتجاوز فحص الروبوت على الخوادم) + وسائط إضافية من الإعداد. */
 function commonArgs(): string[] {
   const cfg = loadConfig();
   const a: string[] = [];
-  if (cfg.tools.cookies) a.push('--cookies', cfg.tools.cookies);
+  const cookies = cookiesFilePath();
+  if (existsSync(cookies)) a.push('--cookies', cookies);
   if (cfg.tools.extraArgs.length) a.push(...cfg.tools.extraArgs);
   return a;
 }

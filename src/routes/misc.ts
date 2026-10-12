@@ -1,5 +1,8 @@
-/** مسارات متنوّعة محميّة: الإعدادات، النظام، وتغيير كلمة المرور. */
+/** مسارات متنوّعة محميّة: الإعدادات، النظام، كوكيز يوتيوب، وتغيير كلمة المرور. */
 import type { FastifyInstance } from 'fastify';
+import { existsSync } from 'node:fs';
+import { mkdir, writeFile, rm } from 'node:fs/promises';
+import path from 'node:path';
 import { z } from 'zod';
 import { parse } from '../lib/validate.ts';
 import { errors } from '../lib/errors.ts';
@@ -7,7 +10,7 @@ import { requireUser } from '../plugins/auth.ts';
 import { Settings, Users, Sessions } from '../db/repo.ts';
 import { loadConfig } from '../config/env.ts';
 import { hashPassword, verifyPassword } from '../services/auth.ts';
-import { version as ytdlpVersion, update as ytdlpUpdate } from '../services/ytdlp.ts';
+import { version as ytdlpVersion, update as ytdlpUpdate, cookiesFilePath } from '../services/ytdlp.ts';
 import { ffmpegAvailable } from '../services/ffmpeg.ts';
 import { checkConnection as tgCheck } from '../services/telegram.ts';
 
@@ -73,5 +76,33 @@ export default async function miscRoutes(app: FastifyInstance): Promise<void> {
     const user = requireUser(request);
     if (user.role !== 'owner') throw errors.forbidden();
     return ytdlpUpdate();
+  });
+
+  // ===== كوكيز يوتيوب (لتجاوز فحص الروبوت على الخوادم) =====
+  app.get('/api/system/cookies', async (request) => {
+    requireUser(request);
+    return { present: existsSync(cookiesFilePath()), path: cookiesFilePath() };
+  });
+
+  app.post('/api/system/cookies', async (request) => {
+    const user = requireUser(request);
+    if (user.role !== 'owner') throw errors.forbidden();
+    const body = parse(z.object({ content: z.string().min(10).max(2 * 1024 * 1024) }), request.body);
+    const content = body.content;
+    // تحقّق خفيف أنه ملف كوكيز (Netscape) أو يحوي نطاق يوتيوب
+    if (!/#\s*Netscape|\.youtube\.com|\byoutube\.com\b|\t/.test(content)) {
+      throw errors.badRequest('المحتوى لا يبدو ملف cookies.txt صالحًا (صيغة Netscape).');
+    }
+    const file = cookiesFilePath();
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, content, 'utf8');
+    return { ok: true, present: true };
+  });
+
+  app.delete('/api/system/cookies', async (request) => {
+    const user = requireUser(request);
+    if (user.role !== 'owner') throw errors.forbidden();
+    await rm(cookiesFilePath(), { force: true }).catch(() => {});
+    return { ok: true, present: false };
   });
 }

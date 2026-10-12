@@ -27,6 +27,45 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
       .catch(() => {});
   }, []);
 
+  // كوكيز يوتيوب
+  const [cookiesPresent, setCookiesPresent] = useState(false);
+  const [cookiesText, setCookiesText] = useState('');
+  const [cookiesBusy, setCookiesBusy] = useState(false);
+  const [cookiesMsg, setCookiesMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    api.ytCookies.status().then((r) => setCookiesPresent(r.present)).catch(() => {});
+  }, []);
+
+  const saveCookies = async () => {
+    setCookiesBusy(true);
+    setCookiesMsg(null);
+    try {
+      const r = await api.ytCookies.save(cookiesText);
+      setCookiesPresent(r.present);
+      setCookiesText('');
+      setCookiesMsg('تم حفظ الكوكيز ✓');
+      onSaved();
+    } catch (e) {
+      setCookiesMsg(e instanceof Error ? e.message : 'تعذّر الحفظ');
+    } finally {
+      setCookiesBusy(false);
+    }
+  };
+
+  const clearCookies = async () => {
+    setCookiesBusy(true);
+    try {
+      await api.ytCookies.clear();
+      setCookiesPresent(false);
+      setCookiesMsg('حُذفت الكوكيز');
+    } catch {
+      /* تجاهل */
+    } finally {
+      setCookiesBusy(false);
+    }
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -192,6 +231,58 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
               />
               <div className="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
             </label>
+          </div>
+        </div>
+
+        {/* YouTube Cookies */}
+        <div className="p-6 rounded-xl bg-surface-container-low border border-white/5 space-y-4 shadow-xl">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-base font-semibold text-on-surface">كوكيز يوتيوب</h3>
+              <p className="text-xs text-outline mt-0.5">
+                يوتيوب يحجب الخوادم ويطلب «تأكيد أنك لست روبوتًا». الصق محتوى ملف cookies.txt (صيغة Netscape)
+                المُصدَّر من متصفّحك لتفعيل التحميل من يوتيوب.
+              </p>
+            </div>
+            <span
+              className={`font-mono text-xs px-2.5 py-0.5 rounded ${
+                cookiesPresent ? 'bg-surface-container-high text-secondary-fixed' : 'bg-surface-container-high text-outline'
+              }`}
+            >
+              {cookiesPresent ? 'مُفعّلة' : 'غير مضبوطة'}
+            </span>
+          </div>
+
+          <textarea
+            value={cookiesText}
+            onChange={(e) => setCookiesText(e.target.value)}
+            dir="ltr"
+            rows={4}
+            placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	...	SID	..."
+            className="w-full bg-surface-container-lowest border border-white/5 text-on-surface font-mono text-[11px] p-3 rounded-lg focus:outline-none focus:border-primary-container"
+          />
+
+          {cookiesMsg && <p className="text-xs text-secondary-fixed">{cookiesMsg}</p>}
+
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={saveCookies}
+              disabled={cookiesBusy || cookiesText.trim().length < 10}
+              className="px-4 py-2 rounded-lg bg-primary-container text-on-primary-container font-mono text-xs font-semibold hover:bg-secondary-container hover:text-on-secondary-fixed-variant transition-all disabled:opacity-50"
+            >
+              {cookiesBusy ? 'يحفظ…' : 'حفظ الكوكيز'}
+            </button>
+            {cookiesPresent && (
+              <button
+                type="button"
+                onClick={clearCookies}
+                disabled={cookiesBusy}
+                className="px-4 py-2 rounded-lg bg-surface-container-high text-on-surface-variant hover:text-on-surface font-mono text-xs transition-colors disabled:opacity-50"
+              >
+                حذف
+              </button>
+            )}
           </div>
         </div>
 
