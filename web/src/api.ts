@@ -115,7 +115,8 @@ export const files = {
 export const downloads = {
   probe: (url: string) =>
     req<{
-      mode: 'direct' | 'media';
+      mode: 'direct' | 'media' | 'error';
+      message?: string;
       title?: string;
       durationSec?: number;
       thumbnail?: string;

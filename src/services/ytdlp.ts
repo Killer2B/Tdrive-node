@@ -63,7 +63,7 @@ export async function probe(url: string, signal?: AbortSignal): Promise<YtProbe>
   const { stdout, code, stderr } = await runCapture(
     cfg.tools.ytdlpPath,
     ['-J', '--no-playlist', '--no-warnings', ...commonArgs(), '--', url],
-    { timeoutMs: 25_000, signal },
+    { timeoutMs: 15_000, signal },
   );
   if (code !== 0) {
     const hint = /Sign in to confirm|not a bot|cookies/i.test(stderr)

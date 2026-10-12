@@ -75,6 +75,10 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
     setProbeError(null);
     try {
       const result = await api.downloads.probe(url.trim());
+      if (result.mode === 'error') {
+        setProbeError(result.message ?? 'تعذّرت قراءة الرابط');
+        return;
+      }
       setProbe(result);
       setFormatId(result.qualities?.[0]?.id ?? 'best');
     } catch (e) {
@@ -90,7 +94,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
     try {
       await api.downloads.enqueue({
         url: url.trim(),
-        mode: probe.mode,
+        mode: probe.mode === 'media' ? 'media' : 'direct',
         formatId: probe.mode === 'media' ? formatId : undefined,
         folderId,
         title: probe.title,

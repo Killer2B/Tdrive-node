@@ -11,11 +11,18 @@ import * as ytdlp from '../services/ytdlp.ts';
 import { enqueueDownload, requestCancel, retryJob, toApiJob } from '../services/queue.ts';
 import { extOf } from '../services/files.ts';
 
-const DIRECT_EXTS = new Set([
-  'mp4', 'mkv', 'webm', 'mov', 'avi', 'm4v', 'ts', 'mp3', 'm4a', 'aac', 'wav', 'flac', 'ogg', 'opus',
-  'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'pdf', 'zip', 'rar', '7z', 'tar', 'gz', 'iso',
-  'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'csv', 'bin', 'apk', 'exe', 'dmg',
-]);
+// مواقع الوسائط التي تُعالَج عبر yt-dlp (أي رابط آخر يُعامَل تحميلًا مباشرًا).
+const MEDIA_HOSTS = [
+  'youtube.com', 'youtu.be', 'youtube-nocookie.com', 'music.youtube.com',
+  'vimeo.com', 'dailymotion.com', 'tiktok.com', 'instagram.com', 'facebook.com', 'fb.watch',
+  'twitter.com', 'x.com', 'twitch.tv', 'soundcloud.com', 'reddit.com', 'bilibili.com',
+  'ok.ru', 'rutube.ru', 'vk.com', 'pinterest.com', 'nicovideo.jp', 'bitchute.com', 'odysee.com',
+];
+
+function isMediaHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^www\./, '').replace(/^m\./, '');
+  return MEDIA_HOSTS.some((m) => h === m || h.endsWith('.' + m));
+}
 
 function hostnameOf(url: string): string {
   try {
@@ -68,53 +75,52 @@ export default async function downloadRoutes(app: FastifyInstance): Promise<void
   app.post('/api/downloads/probe', { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } }, async (request) => {
     requireUser(request);
     const { url } = parse(probeBody, request.body);
-    const check = await assertPublicHost(hostnameOf(url));
+    const hostname = hostnameOf(url);
+    const check = await assertPublicHost(hostname);
     if (!check.ok) throw errors.forbidden('رُفض الرابط لأسباب أمنية (SSRF).');
 
-    const pathname = (() => {
+    const basename = (() => {
       try {
-        return new URL(url).pathname;
+        return (new URL(url).pathname.split('/').pop() ?? '').trim();
       } catch {
         return '';
       }
     })();
-    const basename = pathname.split('/').pop() ?? '';
-    const urlExt = extOf(basename);
 
-    // HEAD أولًا للتمييز بين ملف مباشر وصفحة ويب (ويمنحنا النوع/الاسم/الحجم بسرعة)
+    // مواقع الوسائط (يوتيوب…) ⇒ yt-dlp. أي رابط آخر ⇒ تحميل مباشر.
+    if (isMediaHost(hostname)) {
+      try {
+        const info = await ytdlp.probe(url);
+        return {
+          mode: 'media' as const,
+          title: info.title,
+          durationSec: info.durationSec,
+          thumbnail: info.thumbnail,
+          uploader: info.uploader,
+          isLive: info.isLive,
+          qualities: info.qualities,
+        };
+      } catch (e) {
+        // نُعيد الخطأ ضمن 200 حتى لا يستبدله وسيط الاستضافة بصفحة HTML (502)
+        return { mode: 'error' as const, message: e instanceof Error ? e.message : 'تعذّرت قراءة الرابط.' };
+      }
+    }
+
+    // رابط ملف مباشر: HEAD للبيانات الوصفية (أفضل جهد)
     let direct: Awaited<ReturnType<typeof probeDirect>> | null = null;
     try {
       direct = await probeDirect(url);
     } catch {
       direct = null;
     }
-    const ct = (direct?.contentType ?? '').toLowerCase().split(';')[0].trim();
-    const isHtml = ct === 'text/html' || ct === 'application/xhtml+xml';
-    const dispExt = direct?.filename ? extOf(direct.filename) : '';
-    const looksDirect =
-      DIRECT_EXTS.has(urlExt) || DIRECT_EXTS.has(dispExt) || (!!direct && !!direct.contentType && !isHtml);
-
-    if (looksDirect) {
-      const d = direct ?? (await probeDirect(url));
-      const filename = ensureExt(d.filename ?? basename, d.contentType);
-      return { mode: 'direct', title: filename, filename, sizeBytes: d.sizeBytes, contentType: d.contentType };
-    }
-
-    // صفحة ويب (موقع وسائط) ⇒ yt-dlp
-    try {
-      const info = await ytdlp.probe(url);
-      return {
-        mode: 'media',
-        title: info.title,
-        durationSec: info.durationSec,
-        thumbnail: info.thumbnail,
-        uploader: info.uploader,
-        isLive: info.isLive,
-        qualities: info.qualities,
-      };
-    } catch (e) {
-      throw errors.badGateway(e instanceof Error ? e.message : 'تعذّرت قراءة الرابط.');
-    }
+    const filename = ensureExt(direct?.filename || basename || 'download', direct?.contentType);
+    return {
+      mode: 'direct' as const,
+      title: filename,
+      filename,
+      sizeBytes: direct?.sizeBytes,
+      contentType: direct?.contentType,
+    };
   });
 
   app.post('/api/downloads', async (request) => {
