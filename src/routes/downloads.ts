@@ -25,6 +25,35 @@ function hostnameOf(url: string): string {
   }
 }
 
+// استنتاج امتداد من نوع المحتوى حين يكون اسم الملف بلا امتداد (مثل روابط CDN الموقّعة)
+const CT_EXT: Record<string, string> = {
+  'application/zip': 'zip',
+  'application/x-zip-compressed': 'zip',
+  'application/x-rar-compressed': 'rar',
+  'application/vnd.rar': 'rar',
+  'application/x-7z-compressed': '7z',
+  'application/gzip': 'gz',
+  'application/x-tar': 'tar',
+  'application/x-iso9660-image': 'iso',
+  'application/pdf': 'pdf',
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'video/x-matroska': 'mkv',
+  'audio/mpeg': 'mp3',
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+};
+
+function ensureExt(name: string, contentType?: string): string {
+  const base = name && name.trim() ? name.trim() : 'download';
+  if (extOf(base)) return base;
+  const ct = (contentType ?? '').toLowerCase().split(';')[0].trim();
+  const e = CT_EXT[ct];
+  return e ? `${base}.${e}` : base;
+}
+
 const probeBody = z.object({ url: z.string().url().max(2048) });
 const enqueueBody = z.object({
   url: z.string().url().max(2048),
@@ -49,54 +78,43 @@ export default async function downloadRoutes(app: FastifyInstance): Promise<void
         return '';
       }
     })();
-    const ext = extOf(pathname.split('/').pop() ?? '');
-    const looksDirect = DIRECT_EXTS.has(ext);
+    const basename = pathname.split('/').pop() ?? '';
+    const urlExt = extOf(basename);
 
-    if (!looksDirect) {
-      try {
-        const info = await ytdlp.probe(url);
-        return {
-          mode: 'media',
-          title: info.title,
-          durationSec: info.durationSec,
-          thumbnail: info.thumbnail,
-          uploader: info.uploader,
-          isLive: info.isLive,
-          qualities: info.qualities,
-        };
-      } catch (e) {
-        // محاولة أخيرة كرابط مباشر — لكن فقط إن كان ملفًّا فعليًّا (ليس صفحة HTML)
-        let direct: Awaited<ReturnType<typeof probeDirect>> | null = null;
-        try {
-          direct = await probeDirect(url);
-        } catch {
-          direct = null;
-        }
-        const ct = (direct?.contentType ?? '').toLowerCase();
-        const isRealFile =
-          !!direct && !!direct.contentType && !ct.startsWith('text/html') && !ct.startsWith('application/xhtml');
-        if (isRealFile) {
-          return {
-            mode: 'direct',
-            title: direct!.filename,
-            filename: direct!.filename,
-            sizeBytes: direct!.sizeBytes,
-            contentType: direct!.contentType,
-          };
-        }
-        // الرابط صفحة ويب لا ملف: أظهر سبب فشل yt-dlp الحقيقيّ (قد يطلب كوكيز)
-        throw errors.badGateway(e instanceof Error ? e.message : 'تعذّرت قراءة الرابط.');
-      }
+    // HEAD أولًا للتمييز بين ملف مباشر وصفحة ويب (ويمنحنا النوع/الاسم/الحجم بسرعة)
+    let direct: Awaited<ReturnType<typeof probeDirect>> | null = null;
+    try {
+      direct = await probeDirect(url);
+    } catch {
+      direct = null;
+    }
+    const ct = (direct?.contentType ?? '').toLowerCase().split(';')[0].trim();
+    const isHtml = ct === 'text/html' || ct === 'application/xhtml+xml';
+    const dispExt = direct?.filename ? extOf(direct.filename) : '';
+    const looksDirect =
+      DIRECT_EXTS.has(urlExt) || DIRECT_EXTS.has(dispExt) || (!!direct && !!direct.contentType && !isHtml);
+
+    if (looksDirect) {
+      const d = direct ?? (await probeDirect(url));
+      const filename = ensureExt(d.filename ?? basename, d.contentType);
+      return { mode: 'direct', title: filename, filename, sizeBytes: d.sizeBytes, contentType: d.contentType };
     }
 
-    const d = await probeDirect(url);
-    return {
-      mode: 'direct',
-      title: d.filename,
-      filename: d.filename,
-      sizeBytes: d.sizeBytes,
-      contentType: d.contentType,
-    };
+    // صفحة ويب (موقع وسائط) ⇒ yt-dlp
+    try {
+      const info = await ytdlp.probe(url);
+      return {
+        mode: 'media',
+        title: info.title,
+        durationSec: info.durationSec,
+        thumbnail: info.thumbnail,
+        uploader: info.uploader,
+        isLive: info.isLive,
+        qualities: info.qualities,
+      };
+    } catch (e) {
+      throw errors.badGateway(e instanceof Error ? e.message : 'تعذّرت قراءة الرابط.');
+    }
   });
 
   app.post('/api/downloads', async (request) => {

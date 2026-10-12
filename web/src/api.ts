@@ -61,7 +61,20 @@ async function req<T>(path: string, options: RequestInit = {}): Promise<T> {
     ...options,
   });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : {};
+  let data: any = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new ApiError(
+        res.status,
+        'BadResponse',
+        res.ok
+          ? 'استجابة غير متوقّعة من الخادم.'
+          : `تعذّر إكمال الطلب (${res.status}). قد تكون المهلة انتهت أو هناك وسيط يعترض — حاول مجددًا.`,
+      );
+    }
+  }
   if (!res.ok) {
     const err = data?.error ?? {};
     throw new ApiError(res.status, err.code ?? 'Error', err.message ?? `HTTP ${res.status}`);
