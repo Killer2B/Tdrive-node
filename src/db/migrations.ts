@@ -185,4 +185,26 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE files ADD COLUMN thumb_tg_message_id INTEGER;
     `,
   },
+  {
+    id: '0003_activity_and_share_ip',
+    up: /* sql */ `
+      -- سجلّ النشاط الحقيقيّ (يغذّي: سجلّ التدقيق، الإشعارات، نشاط الملف، تصدير CSV)
+      CREATE TABLE activity_log (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        action      TEXT NOT NULL,
+        target_type TEXT,
+        target_id   TEXT,
+        target_name TEXT,
+        ip          TEXT,
+        meta        TEXT,
+        created_at  INTEGER NOT NULL
+      );
+      CREATE INDEX idx_activity_user ON activity_log(user_id, created_at);
+      CREATE INDEX idx_activity_target ON activity_log(user_id, target_id, created_at);
+
+      -- قائمة سماح IP/CIDR اختيارية لروابط المشاركة العامّة
+      ALTER TABLE shares ADD COLUMN ip_allow TEXT;
+    `,
+  },
 ];

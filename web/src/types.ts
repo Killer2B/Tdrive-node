@@ -17,16 +17,14 @@ export interface FileItem {
   size: string;
   sizeBytes: number;
   modified: string;
-  securityTier: 'AES-256 Vault' | 'Token Encrypted' | 'Zero-Knowledge' | 'Workspace Auth' | 'Hardware Key';
-  tags: { label: string; color: string }[];
-  collaborators: { name: string; avatar?: string; initials: string; role: string }[];
+  modifiedTs: number;
   sha256: string;
-  path: string;
   parentId?: string;
   isStarred?: boolean;
   isPinned?: boolean;
   isDeleted?: boolean;
   deletedDaysLeft?: number;
+  trashedAt?: number;
   previewUrl?: string;
   technicalSpecs?: {
     resolution?: string;
@@ -35,20 +33,6 @@ export interface FileItem {
     bitDepth?: string;
     encryption?: string;
   };
-  versionHistory?: {
-    version: string;
-    label: string;
-    timeAgo: string;
-    isActive: boolean;
-    author: string;
-  }[];
-  auditLog?: {
-    action: string;
-    user: string;
-    timeAgo: string;
-    ip: string;
-    verified: boolean;
-  }[];
 }
 
 export interface SharedVault {
@@ -85,6 +69,7 @@ export interface ExternalLink {
   expiry: string;
   isRevoked: boolean;
   isExpired?: boolean;
+  ipAllow?: string | null;
 }
 
 export interface ActiveTransfer {

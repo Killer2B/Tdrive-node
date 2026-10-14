@@ -14,7 +14,9 @@ import {
   deleteFilePermanent,
   storageUsage,
   uniqueName,
+  purgeExpiredTrash,
 } from '../services/files.ts';
+import { Activity } from '../services/activity.ts';
 
 function ownFile(request: FastifyRequest, id: string): FileRow {
   const user = requireUser(request);
@@ -79,24 +81,60 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
       patch.name = uniqueName(user.id, targetFolder, body.name);
     }
     Files.update(file.id, patch);
+    if (body.starred !== undefined || body.pinned !== undefined || body.name !== undefined || body.folderId !== undefined) {
+      Activity.record({
+        userId: user.id,
+        action: 'file_updated',
+        targetType: 'file',
+        targetId: file.id,
+        targetName: body.name ?? file.name,
+        ip: request.ip,
+        meta: { starred: body.starred, pinned: body.pinned },
+      });
+    }
     return { file: toApiFile(Files.findById(file.id)!) };
   });
 
   app.post('/api/files/:id/trash', async (request) => {
     const file = ownFile(request, (request.params as { id: string }).id);
     trashFile(file);
+    Activity.record({
+      userId: requireUser(request).id,
+      action: 'file_trashed',
+      targetType: 'file',
+      targetId: file.id,
+      targetName: file.name,
+      ip: request.ip,
+    });
     return { ok: true };
   });
 
   app.post('/api/files/:id/restore', async (request) => {
     const file = ownFile(request, (request.params as { id: string }).id);
     restoreFile(file);
+    Activity.record({
+      userId: requireUser(request).id,
+      action: 'file_restored',
+      targetType: 'file',
+      targetId: file.id,
+      targetName: file.name,
+      ip: request.ip,
+    });
     return { ok: true };
   });
 
   app.delete('/api/files/:id', async (request) => {
     const file = ownFile(request, (request.params as { id: string }).id);
     await deleteFilePermanent(file);
+    Activity.record({
+      userId: requireUser(request).id,
+      action: 'file_deleted',
+      targetType: 'file',
+      targetId: file.id,
+      targetName: file.name,
+      ip: request.ip,
+      meta: { sizeBytes: file.size },
+    });
     return { ok: true };
   });
 
@@ -104,7 +142,19 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
     const user = requireUser(request);
     const items = Files.trashList(user.id);
     for (const f of items) await deleteFilePermanent(f);
+    Activity.record({
+      userId: user.id,
+      action: 'trash_emptied',
+      targetType: 'system',
+      ip: request.ip,
+      meta: { removed: items.length, freedBytes: items.reduce((sum, file) => sum + file.size, 0) },
+    });
     return { ok: true, removed: items.length };
+  });
+
+  app.post('/api/files/trash/purge-expired', async (request) => {
+    const user = requireUser(request);
+    return purgeExpiredTrash(user.id);
   });
 
   app.get('/api/files/:id/stream', async (request, reply) => {
@@ -114,6 +164,17 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/files/:id/download', async (request, reply) => {
     const file = ownFile(request, (request.params as { id: string }).id);
+    if (!request.headers.range) {
+      Activity.record({
+        userId: requireUser(request).id,
+        action: 'download',
+        targetType: 'file',
+        targetId: file.id,
+        targetName: file.name,
+        ip: request.ip,
+        meta: { sizeBytes: file.size },
+      });
+    }
     return serveFileRange(request, reply, file, { attachment: true });
   });
 

@@ -1,5 +1,5 @@
 /** مصنع خادم Fastify: الإضافات، المعالجة المركزية للأخطاء، والمسارات. */
-import Fastify, { type FastifyInstance, type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
+import Fastify, { type FastifyBaseLogger, type FastifyInstance, type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify';
 import { getLogger } from './lib/logger.ts';
 import { isAppError } from './lib/errors.ts';
 import { registerSecurity } from './plugins/security.ts';
@@ -31,7 +31,7 @@ function errorHandler(error: FastifyError, request: FastifyRequest, reply: Fasti
 
 export async function buildServer(): Promise<FastifyInstance> {
   const app = Fastify({
-    loggerInstance: getLogger(),
+    loggerInstance: getLogger() as FastifyBaseLogger,
     trustProxy: true,
     bodyLimit: 2 * 1024 * 1024, // 2MB لأجسام JSON؛ أجزاء الرفع تُعالَج كتدفّق octet-stream
   });

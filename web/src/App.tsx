@@ -4,7 +4,6 @@
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ViewMode, FileItem, ExternalLink, ActiveTransfer, ClientNode } from './types';
-import { INITIAL_SHARED_VAULTS } from './data/mockData';
 import * as api from './api';
 import { Login } from './components/Login';
 import { PublicShare } from './components/PublicShare';
@@ -40,14 +39,22 @@ export default function App() {
   const [currentView, setCurrentView] = useState<ViewMode>('overview');
   const [files, setFiles] = useState<FileItem[]>([]);
   const [trashItems, setTrashItems] = useState<FileItem[]>([]);
-  const [sharedVaults] = useState(INITIAL_SHARED_VAULTS);
+  const [sharedVaults, setSharedVaults] = useState<api.ApiVault[]>([]);
+  const [vaultMeta, setVaultMeta] = useState<{ activeSessions: number; shares: number }>({ activeSessions: 0, shares: 0 });
   const [externalLinks, setExternalLinks] = useState<ExternalLink[]>([]);
   const [transfers, setTransfers] = useState<ActiveTransfer[]>([]);
   const [clientNodes, setClientNodes] = useState<ClientNode[]>([]);
+  const [overviewStats, setOverviewStats] = useState<api.OverviewStats | null>(null);
+  const [securityStats, setSecurityStats] = useState<api.SecurityStats | null>(null);
+  const [activityItems, setActivityItems] = useState<api.ApiActivity[]>([]);
+  const [dashboardError, setDashboardError] = useState<string | null>(null);
+  const [shareRevision, setShareRevision] = useState(0);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesError, setFilesError] = useState<string | null>(null);
 
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
   const [storageUsedTB, setStorageUsedTB] = useState<number>(0);
-  const [storageTotalTB, setStorageTotalTB] = useState<number>(5.0);
+  const [storageTotalTB, setStorageTotalTB] = useState<number>(0);
   const [viewLayout, setViewLayout] = useState<'grid' | 'list'>('grid');
 
   const [isShareDrawerOpen, setIsShareDrawerOpen] = useState(false);
@@ -63,7 +70,7 @@ export default function App() {
 
   const addToast = useCallback(
     (title: string, message?: string, type: ToastMessage['type'] = 'success') => {
-      const id = `toast-${Date.now()}-${Math.random()}`;
+      const id = `toast-${crypto.randomUUID()}`;
       setToasts((prev) => [...prev, { id, title, message, type }]);
       setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
     },
@@ -71,19 +78,60 @@ export default function App() {
   );
   const removeToast = (id: string) => setToasts((prev) => prev.filter((t) => t.id !== id));
 
+  const handleSetViewLayout = useCallback((mode: 'grid' | 'list') => {
+    const previous = viewLayout;
+    setViewLayout(mode);
+    void api.settings.save({ defaultView: mode }).catch((error: unknown) => {
+      setViewLayout(previous);
+      addToast('تعذّر حفظ طريقة العرض', error instanceof Error ? error.message : undefined, 'error');
+    });
+  }, [viewLayout, addToast]);
+
   // ===== تحميل البيانات =====
   const reloadFiles = useCallback(async () => {
+    setFilesLoading(true);
     try {
       const [all, trash] = await Promise.all([api.files.list({ view: 'all' }), api.files.list({ view: 'trash' })]);
-      setFiles(all.files.map((f) => api.toFileItem(f, username)));
-      setTrashItems(trash.files.map((f) => api.toFileItem(f, username)));
+      setFiles(all.files.map((f) => api.toFileItem(f, overviewStats?.retentionDays)));
+      setTrashItems(trash.files.map((f) => api.toFileItem(f, overviewStats?.retentionDays)));
       const usedTB = all.usage.usedBytes / 1e12;
       setStorageUsedTB(Number(usedTB.toFixed(3)));
-      setStorageTotalTB(Math.max(5, Math.ceil(usedTB * 1.25)));
-    } catch {
-      /* الجلسة قد تكون انتهت */
+      setFilesError(null);
+      setDashboardError(null);
+    } catch (error) {
+      setFilesError(error instanceof Error ? error.message : 'تعذّر تحميل الملفات.');
+      throw error;
+    } finally {
+      setFilesLoading(false);
     }
-  }, [username]);
+  }, [overviewStats?.retentionDays]);
+
+  const reloadWorkspace = useCallback(async () => {
+    try {
+      const [overview, security, vaultResult, activityResult, shareResult, sessionResult] = await Promise.all([
+        api.stats.overview(),
+        api.stats.security(),
+        api.vaults.list(),
+        api.activity.list({ limit: 20 }),
+        api.shares.list(),
+        api.sessions.list(),
+      ]);
+      setOverviewStats(overview);
+      setSecurityStats(security);
+      setSharedVaults(vaultResult.vaults);
+      setVaultMeta(vaultResult.meta);
+      setActivityItems(activityResult.items);
+      setExternalLinks(shareResult.links);
+      setClientNodes(sessionResult.nodes);
+      setStorageUsedTB(Number((overview.usedBytes / 1e12).toFixed(3)));
+      setStorageTotalTB(overview.quotaBytes / 1e12);
+      setViewLayout(overview.defaultView);
+      setDashboardError(null);
+    } catch (error) {
+      setDashboardError(error instanceof Error ? error.message : 'تعذّر تحميل بيانات مساحة العمل.');
+      addToast('تعذّر تحميل البيانات', error instanceof Error ? error.message : undefined, 'error');
+    }
+  }, [addToast]);
 
   const refreshTransfers = useCallback(() => {
     const list = Array.from(jobsRef.current.values())
@@ -107,19 +155,24 @@ export default function App() {
     })();
   }, []);
 
+  useEffect(() => {
+    const expireSession = () => setAuthState('out');
+    window.addEventListener('tdrive:unauthorized', expireSession);
+    return () => window.removeEventListener('tdrive:unauthorized', expireSession);
+  }, []);
+
   // بعد الدخول: حمّل الملفّات والمهام واشترك في SSE
   useEffect(() => {
     if (authState !== 'in') return;
-    void reloadFiles();
-    api.shares.list().then((r) => setExternalLinks(r.links)).catch(() => {});
-    api.sessions.list().then((r) => setClientNodes(r.nodes)).catch(() => {});
+    void reloadFiles().catch(() => {});
+    void reloadWorkspace();
     (async () => {
       try {
         const { jobs } = await api.downloads.jobs('active');
         for (const j of jobs) jobsRef.current.set(j.id, j);
         refreshTransfers();
       } catch {
-        /* تجاهل */
+        addToast('تعذّر تحميل التحويلات', 'أعد تحميل الصفحة للمحاولة مجددًا.', 'error');
       }
     })();
     const disconnect = api.connectEvents((job) => {
@@ -134,7 +187,7 @@ export default function App() {
       }
     });
     return disconnect;
-  }, [authState, reloadFiles, refreshTransfers, addToast]);
+  }, [authState, reloadFiles, reloadWorkspace, refreshTransfers, addToast]);
 
   // ===== إجراءات الملفّات =====
   const handleDownloadFile = (file: FileItem) => {
@@ -147,41 +200,78 @@ export default function App() {
     addToast('بدأ التنزيل', file.name);
   };
 
-  const handleCopy = (text: string, label = 'الرابط') => {
-    navigator.clipboard.writeText(text);
-    addToast(`نُسخ ${label}`, text);
+  const handleCopy = async (text: string, label = 'الرابط') => {
+    try {
+      await navigator.clipboard.writeText(text);
+      addToast(`نُسخ ${label}`, text);
+    } catch (error) {
+      addToast('تعذّر النسخ', error instanceof Error ? error.message : 'تحقّق من أذونات الحافظة.', 'error');
+    }
   };
 
   const handleDeleteFiles = async (ids: string[]) => {
-    await Promise.all(ids.map((id) => api.files.trash(id).catch(() => {})));
-    addToast('نُقل إلى السلّة', `${ids.length} عنصر`, 'warning');
-    await reloadFiles();
+    if (!ids.length || !window.confirm(`Move ${ids.length} selected item${ids.length === 1 ? '' : 's'} to Trash?`)) return;
+    try {
+      await Promise.all(ids.map((id) => api.files.trash(id)));
+      addToast('نُقل إلى السلّة', `${ids.length} عنصر`, 'warning');
+      await Promise.all([reloadFiles(), reloadWorkspace()]);
+    } catch (error) {
+      addToast('تعذّر حذف الملفّات', error instanceof Error ? error.message : undefined, 'error');
+    }
   };
 
   const handleRestoreItem = async (id: string) => {
-    await api.files.restore(id).catch(() => {});
-    addToast('استُعيد الملف');
-    await reloadFiles();
+    try {
+      await api.files.restore(id);
+      addToast('استُعيد الملف');
+      await Promise.all([reloadFiles(), reloadWorkspace()]);
+    } catch (error) {
+      addToast('تعذّرت الاستعادة', error instanceof Error ? error.message : undefined, 'error');
+    }
   };
 
   const handleShredItem = async (id: string) => {
-    await api.files.remove(id).catch(() => {});
-    addToast('حُذف نهائيًّا');
-    await reloadFiles();
+    if (!window.confirm('سيُحذف الملف نهائيًا ولا يمكن استعادته. هل تريد المتابعة؟')) return;
+    try {
+      await api.files.remove(id);
+      addToast('حُذف نهائيًّا');
+      await Promise.all([reloadFiles(), reloadWorkspace()]);
+    } catch (error) {
+      addToast('تعذّر الحذف النهائي', error instanceof Error ? error.message : undefined, 'error');
+    }
   };
 
   const handleEmptyAllTrash = async () => {
-    const res = await api.files.emptyTrash().catch(() => ({ removed: 0 }));
-    addToast('أُفرغت السلّة', `${(res as { removed: number }).removed} ملف`);
-    await reloadFiles();
+    if (!window.confirm('سيُحذف كل ما في سلّة المهملات نهائيًا. هل تريد المتابعة؟')) return;
+    try {
+      const res = await api.files.emptyTrash();
+      addToast('أُفرغت السلّة', `${res.removed} ملف`);
+      await Promise.all([reloadFiles(), reloadWorkspace()]);
+    } catch (error) {
+      addToast('تعذّر إفراغ السلّة', error instanceof Error ? error.message : undefined, 'error');
+    }
+  };
+
+  const handlePurgeExpiredTrash = async () => {
+    try {
+      const res = await api.files.purgeExpiredTrash();
+      addToast('اكتمل حذف العناصر المنتهية', `${res.removed} ملف · ${api.formatSize(res.freedBytes)}`);
+      await Promise.all([reloadFiles(), reloadWorkspace()]);
+    } catch (error) {
+      addToast('تعذّر حذف العناصر المنتهية', error instanceof Error ? error.message : undefined, 'error');
+    }
   };
 
   const handleToggleStar = async (fileId: string) => {
     const file = files.find((f) => f.id === fileId);
     const next = !file?.isStarred;
-    await api.files.patch(fileId, { starred: next }).catch(() => {});
-    setFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, isStarred: next } : f)));
-    addToast(next ? 'أُضيف للمفضّلة' : 'أُزيل من المفضّلة', file?.name);
+    try {
+      await api.files.patch(fileId, { starred: next });
+      setFiles((prev) => prev.map((f) => (f.id === fileId ? { ...f, isStarred: next } : f)));
+      addToast(next ? 'أُضيف للمفضّلة' : 'أُزيل من المفضّلة', file?.name);
+    } catch (error) {
+      addToast('تعذّر تحديث المفضّلة', error instanceof Error ? error.message : undefined, 'error');
+    }
   };
 
   // ===== المشاركات (حقيقية عبر الـ API) =====
@@ -191,17 +281,50 @@ export default function App() {
   };
   const handleLinkCreated = (newLink: ExternalLink) => {
     setExternalLinks((prev) => [newLink, ...prev]);
+    setShareRevision((revision) => revision + 1);
     addToast('أُنشئت المشاركة', newLink.vanityEndpoint);
+    void reloadWorkspace();
   };
   const handleRevokeLink = async (id: string) => {
-    await api.shares.revoke(id).catch(() => {});
-    setExternalLinks((prev) => prev.map((l) => (l.id === id ? { ...l, isRevoked: true } : l)));
-    addToast('أُلغيت المشاركة', undefined, 'error');
+    if (!window.confirm('إلغاء هذا الرابط سيمنع الوصول إليه. هل تريد المتابعة؟')) return;
+    try {
+      await api.shares.revoke(id);
+      setExternalLinks((prev) => prev.map((l) => (l.id === id ? { ...l, isRevoked: true } : l)));
+      addToast('أُلغيت المشاركة', undefined, 'warning');
+      await reloadWorkspace();
+    } catch (error) {
+      addToast('تعذّر إلغاء المشاركة', error instanceof Error ? error.message : undefined, 'error');
+    }
   };
-  const handleZeroOut = () => {
-    setClientNodes((prev) => prev.map((n) => ({ ...n, isRevoked: true })));
-    setExternalLinks((prev) => prev.map((l) => ({ ...l, isRevoked: true })));
-    addToast('نُفّذ المسح الطارئ', undefined, 'error');
+  const handleZeroOut = async () => {
+    try {
+      const result = await api.security.wipePeers();
+      addToast('أُلغيت الجلسات والمشاركات', `${result.revokedSessions} جلسة · ${result.revokedShares} مشاركة`, 'warning');
+      await reloadWorkspace();
+    } catch (error) {
+      addToast('فشل المسح الطارئ', error instanceof Error ? error.message : undefined, 'error');
+      throw error;
+    }
+  };
+
+  const handleCancelTransfer = async (id: string) => {
+    try {
+      await api.downloads.cancel(id);
+      const { jobs } = await api.downloads.jobs('active');
+      jobsRef.current = new Map(jobs.map((job) => [job.id, job]));
+      refreshTransfers();
+    } catch (error) {
+      addToast('تعذّر إلغاء التحويل', error instanceof Error ? error.message : undefined, 'error');
+    }
+  };
+
+  const handleExportActivity = (fileId?: string) => {
+    const link = document.createElement('a');
+    link.href = api.activity.exportUrl(fileId);
+    link.download = 'tdrive-activity.csv';
+    document.body.append(link);
+    link.click();
+    link.remove();
   };
 
   if (authState === 'checking') {
@@ -228,6 +351,7 @@ export default function App() {
 
       <Sidebar
         currentView={currentView}
+        username={username}
         onNavigate={(view) => {
           setCurrentView(view);
           window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -242,30 +366,41 @@ export default function App() {
         <Header
           onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
           viewLayout={viewLayout}
-          onToggleViewLayout={setViewLayout}
-          onFilterClick={(type) => addToast('تصفية', type)}
+          onToggleViewLayout={handleSetViewLayout}
+          username={username}
+          notifications={activityItems}
+          onFilterClick={(type) => {
+            if (type === 'Type') setCurrentView('all-files');
+            else if (type === 'Shares') setCurrentView('shared-vaults');
+            else setCurrentView('recent-starred');
+          }}
         />
 
         <main className="relative pt-16 w-full bg-background min-h-[calc(100vh-64px)] pb-12">
           {currentView === 'overview' && (
             <OverviewView
-              files={files}
               transfers={transfers}
+              stats={overviewStats}
+              loadError={dashboardError}
+              onRetry={() => void reloadWorkspace()}
               onOpenUpload={() => setIsUploadOpen(true)}
               onOpenCreateShare={() => openShare()}
               onSelectFile={(f) => setSelectedFile(f)}
               onDownloadFile={handleDownloadFile}
-              onCopyFileLink={(f) => handleCopy(`${location.origin}/f/${f.id}`, f.name)}
               onNavigateToAllFiles={() => setCurrentView('all-files')}
               onNavigateToTrash={() => setCurrentView('recovery-trash')}
-              storageUsedTB={storageUsedTB}
-              storageTotalTB={storageTotalTB}
+              onCancelTransfer={handleCancelTransfer}
             />
           )}
 
           {currentView === 'all-files' && (
             <AllFilesView
               files={files}
+              viewLayout={viewLayout}
+              shareRevision={shareRevision}
+              isLoading={filesLoading}
+              loadError={filesError}
+              onRetry={() => { void reloadFiles().catch(() => {}); }}
               selectedFile={selectedFile}
               onSelectFile={(f) => setSelectedFile(f)}
               onDeleteFiles={handleDeleteFiles}
@@ -273,7 +408,7 @@ export default function App() {
               onOpenUpload={() => setIsUploadOpen(true)}
               onOpenCreateShare={(t) => openShare(t)}
               onCopyChecksum={(hash) => handleCopy(hash, 'البصمة SHA-256')}
-              onRestoreVersion={(v) => addToast('استُعيدت النسخة', v)}
+              onExportAuditLogs={() => handleExportActivity(selectedFile?.id)}
             />
           )}
 
@@ -281,29 +416,42 @@ export default function App() {
             <SharedVaultsView
               vaults={sharedVaults}
               links={externalLinks}
+              activityItems={activityItems}
+              meta={vaultMeta}
               onOpenCreateShare={() => openShare()}
               onRevokeLink={handleRevokeLink}
               onCopyLink={(url) => handleCopy(url, 'رابط المشاركة')}
-              onExportAuditCsv={() => addToast('تصدير السجلّ', 'CSV')}
+              onExportAuditCsv={() => handleExportActivity()}
+              onRetry={() => void reloadWorkspace()}
             />
           )}
 
           {currentView === 'security-access' && (
             <SecurityAuditView
               clientNodes={clientNodes}
+              stats={securityStats}
+              loadError={dashboardError}
+              onRetry={() => void reloadWorkspace()}
               onRevokeNode={async (nodeId) => {
-                await api.sessions.revoke(nodeId).catch(() => {});
-                setClientNodes((prev) => prev.map((n) => (n.id === nodeId ? { ...n, isRevoked: true } : n)));
-                addToast('أُلغيت الجلسة', undefined, 'warning');
+                try {
+                  await api.sessions.revoke(nodeId);
+                  setClientNodes((prev) => prev.filter((n) => n.id !== nodeId));
+                  addToast('أُلغيت الجلسة', undefined, 'warning');
+                } catch (error) {
+                  addToast('تعذّر إلغاء الجلسة', error instanceof Error ? error.message : undefined, 'error');
+                }
               }}
               onOpenDeduplication={() => setIsDeduplicationOpen(true)}
-              onEmptyStaleTrash={() => void handleEmptyAllTrash()}
-              onConvertTiffs={() => addToast('تحويل', 'اكتمل')}
-              onRecalculateQuotas={() => addToast('أُعيد حساب الحصص')}
+              onEmptyStaleTrash={handlePurgeExpiredTrash}
+              onRecalculateQuotas={async () => {
+                try {
+                  setSecurityStats(await api.stats.security());
+                } catch (error) {
+                  addToast('تعذّر تحديث التحليلات', error instanceof Error ? error.message : undefined, 'error');
+                }
+              }}
               onOpenZeroOutModal={() => setIsZeroOutOpen(true)}
-              onExportAuditLog={() => addToast('تصدير السجلّ')}
-              storageUsedTB={storageUsedTB}
-              storageTotalTB={storageTotalTB}
+              onExportAuditLog={() => handleExportActivity()}
             />
           )}
 
@@ -317,20 +465,27 @@ export default function App() {
               onToggleStar={handleToggleStar}
               onDownloadFile={handleDownloadFile}
               onOpenCreateShare={(t) => openShare(t)}
+              isLoading={filesLoading}
+              loadError={filesError}
+              onRetry={() => { void reloadFiles().catch(() => {}); }}
             />
           )}
 
           {currentView === 'recovery-trash' && (
             <TrashView
               trashItems={trashItems}
+              isLoading={filesLoading}
+              loadError={filesError}
+              onRetry={() => { void reloadFiles().catch(() => {}); }}
               onRestoreItem={handleRestoreItem}
               onShredItem={handleShredItem}
               onEmptyAllTrash={handleEmptyAllTrash}
+              retentionDays={overviewStats?.retentionDays ?? 30}
             />
           )}
 
           {currentView === 'workspace-settings' && (
-            <SettingsView onSaved={() => addToast('حُفظت الإعدادات')} />
+            <SettingsView onSaved={() => { addToast('حُفظت الإعدادات'); void reloadWorkspace(); }} />
           )}
         </main>
       </div>
@@ -346,14 +501,14 @@ export default function App() {
         isOpen={isUploadOpen}
         onClose={() => setIsUploadOpen(false)}
         folderId={null}
-        onUploaded={() => void reloadFiles()}
+        onUploaded={() => { void reloadFiles().catch(() => {}); void reloadWorkspace(); }}
         onToast={addToast}
       />
 
       <DeduplicationModal
         isOpen={isDeduplicationOpen}
         onClose={() => setIsDeduplicationOpen(false)}
-        onPurged={() => addToast('اكتملت إزالة التكرار')}
+        onPurged={() => { addToast('اكتملت إزالة التكرار'); void Promise.all([reloadFiles(), reloadWorkspace()]); }}
       />
 
       <EmergencyZeroOutModal
@@ -365,6 +520,8 @@ export default function App() {
       <UpgradeModal
         isOpen={isUpgradeOpen}
         onClose={() => setIsUpgradeOpen(false)}
+        currentQuotaTB={storageTotalTB}
+        usedBytes={overviewStats?.usedBytes ?? storageUsedTB * 1e12}
         onUpgraded={(q) => {
           setStorageTotalTB(q);
           addToast('حُدّثت السعة', `${q} TB`);

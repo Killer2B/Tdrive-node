@@ -25,6 +25,7 @@ export interface ApiFile {
   isDeleted: boolean;
   modified: number;
   created: number;
+  trashedAt?: number | null;
 }
 
 export interface ApiJob {
@@ -54,12 +55,15 @@ export class ApiError extends Error {
   }
 }
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/+$/, '');
+const apiUrl = (path: string): string => `${API_BASE_URL}${path}`;
+
 async function req<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(path, {
-    credentials: 'include',
-    headers: options.body && !(options.body instanceof ArrayBuffer) ? { 'Content-Type': 'application/json' } : undefined,
-    ...options,
-  });
+  const headers = new Headers(options.headers);
+  if (options.body && !(options.body instanceof ArrayBuffer) && !(options.body instanceof FormData)) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const res = await fetch(apiUrl(path), { ...options, credentials: 'include', headers });
   const text = await res.text();
   let data: any = {};
   if (text) {
@@ -77,6 +81,9 @@ async function req<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
   if (!res.ok) {
     const err = data?.error ?? {};
+    if (res.status === 401 && !path.includes('/api/auth/login') && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('tdrive:unauthorized'));
+    }
     throw new ApiError(res.status, err.code ?? 'Error', err.message ?? `HTTP ${res.status}`);
   }
   return data as T;
@@ -95,7 +102,7 @@ export const auth = {
 
 // ===== الملفّات =====
 export const files = {
-  list: (params: { view?: string; folderId?: string; sort?: string; order?: string; q?: string } = {}) => {
+  list: (params: { view?: string; folderId?: string; sort?: string; order?: string; q?: string; limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams(params as Record<string, string>).toString();
     return req<{ files: ApiFile[]; usage: { usedBytes: number } }>(`/api/files${qs ? `?${qs}` : ''}`);
   },
@@ -105,6 +112,7 @@ export const files = {
   restore: (id: string) => req(`/api/files/${id}/restore`, { method: 'POST' }),
   remove: (id: string) => req(`/api/files/${id}`, { method: 'DELETE' }),
   emptyTrash: () => req<{ removed: number }>('/api/files/trash/empty', { method: 'POST' }),
+  purgeExpiredTrash: () => req<{ removed: number; freedBytes: number }>('/api/files/trash/purge-expired', { method: 'POST' }),
   storage: () => req<{ usedBytes: number }>('/api/storage'),
   streamUrl: (id: string) => `/api/files/${id}/stream`,
   downloadUrl: (id: string) => `/api/files/${id}/download`,
@@ -123,6 +131,7 @@ export const downloads = {
       uploader?: string;
       filename?: string;
       sizeBytes?: number;
+      contentType?: string;
       qualities?: { id: string; label: string; ext: string; height?: number; filesize?: number }[];
     }>('/api/downloads/probe', { method: 'POST', body: JSON.stringify({ url }) }),
   enqueue: (payload: { url: string; mode: 'direct' | 'media'; formatId?: string; folderId?: string | null; name?: string; title?: string }) =>
@@ -133,7 +142,7 @@ export const downloads = {
 };
 
 export const system = () =>
-  req<{ ytdlp: { installed: boolean; version: string | null }; ffmpeg: { installed: boolean }; storageDriver: string; chunkSizeMB: number; maxFileSizeGB: number; backupEnabled: boolean }>(
+  req<{ ytdlp: { installed: boolean; version: string | null }; ffmpeg: { installed: boolean }; storageDriver: string; contentBackend: string; chunkSizeMB: number; maxFileSizeGB: number; backupEnabled: boolean }>(
     '/api/system',
   );
 
@@ -147,9 +156,10 @@ export const ytCookies = {
 
 // ===== المشاركات =====
 export const shares = {
-  create: (payload: { fileId: string; password?: string; expiresDays?: number; maxDownloads?: number; label?: string }) =>
+  create: (payload: { fileId: string; password?: string; expiresDays?: number; maxDownloads?: number; label?: string; ipAllow?: string }) =>
     req<{ link: ExternalLink }>('/api/shares', { method: 'POST', body: JSON.stringify(payload) }),
   list: () => req<{ links: ExternalLink[] }>('/api/shares'),
+  forFile: (id: string) => req<{ shares: ExternalLink[] }>(`/api/files/${encodeURIComponent(id)}/shares`),
   revoke: (id: string) => req(`/api/shares/${id}/revoke`, { method: 'POST' }),
   remove: (id: string) => req(`/api/shares/${id}`, { method: 'DELETE' }),
 };
@@ -165,6 +175,120 @@ export const settings = {
   get: () => req<{ settings: Record<string, unknown> }>('/api/settings'),
   save: (values: Record<string, unknown>) =>
     req<{ settings: Record<string, unknown> }>('/api/settings', { method: 'PUT', body: JSON.stringify(values) }),
+};
+
+export interface ApiActivity {
+  id: string;
+  action: string;
+  targetType: string | null;
+  targetId: string | null;
+  targetName: string | null;
+  ip: string | null;
+  at: number;
+  meta: Record<string, unknown>;
+}
+
+export interface ApiVault {
+  id: string;
+  name: string;
+  filesCount: number;
+  bytes: number;
+  sharesCount: number;
+  shared: boolean;
+  createdAt: number;
+  updatedAt: number;
+  activity: number[];
+}
+
+export interface OverviewStats {
+  activeFiles: number;
+  usedBytes: number;
+  quotaBytes: number;
+  byType: { type: string; count: number; bytes: number; pct: number }[];
+  shares: { active: number; views: number; downloads: number };
+  storage: { chunkedPct: number; backend: string };
+  trash: { count: number; bytes: number };
+  pinned: ApiFile[];
+  recent: ApiFile[];
+  retentionDays: number;
+  defaultView: 'grid' | 'list';
+}
+
+export interface SecurityStats {
+  usedBytes: number;
+  quotaBytes: number;
+  autoExpandBytes: number;
+  byType: OverviewStats['byType'];
+  growth: { month: string; label: string; bytes: number; cumulative: number }[];
+  ingestPerDayBytes: number;
+  runwayDays: number | null;
+  dedup: { groups: number; duplicateFiles: number; reclaimableBytes: number; ratio: number };
+  recommendations: { kind: string; count: number; bytes: number; sample?: string; olderThanDays?: number }[];
+  posture: {
+    kdf: string;
+    dbDriver: string;
+    storageDriver: string;
+    contentBackend: string;
+    ssrfProtection: boolean;
+    cookie: { httpOnly: boolean; secure: boolean; sameSite: string };
+    sessions: number;
+    https: boolean;
+  };
+}
+
+export const stats = {
+  overview: () => req<OverviewStats>('/api/stats/overview'),
+  security: () => req<SecurityStats>('/api/stats/security'),
+  dedup: () =>
+    req<{
+      groups: {
+        sha256: string;
+        keep: { id: string; name: string; sizeBytes: number };
+        duplicates: { id: string; name: string; sizeBytes: number; type: string }[];
+        reclaimableBytes: number;
+      }[];
+      totalReclaimableBytes: number;
+      duplicateFiles: number;
+    }>('/api/stats/dedup'),
+  purgeDuplicates: (ids: string[]) =>
+    req<{ removed: number; freedBytes: number }>('/api/stats/dedup/purge', {
+      method: 'POST',
+      body: JSON.stringify({ ids }),
+    }),
+};
+
+export const activity = {
+  list: (params: { limit?: number; offset?: number; fileId?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.limit !== undefined) query.set('limit', String(params.limit));
+    if (params.offset !== undefined) query.set('offset', String(params.offset));
+    if (params.fileId) query.set('fileId', params.fileId);
+    return req<{ items: ApiActivity[]; meta: { total: number; limit: number; offset: number } }>(
+      `/api/activity${query.size ? `?${query}` : ''}`,
+    );
+  },
+  exportUrl: (fileId?: string) =>
+    apiUrl(`/api/activity/export.csv${fileId ? `?fileId=${encodeURIComponent(fileId)}` : ''}`),
+};
+
+export const vaults = {
+  list: () => req<{ meta: { activeSessions: number; shares: number }; vaults: ApiVault[] }>('/api/vaults'),
+};
+
+export const security = {
+  wipePeers: () =>
+    req<{ revokedSessions: number; revokedShares: number }>('/api/security/wipe-peers', {
+      method: 'POST',
+      body: JSON.stringify({ confirm: 'WIPE-CONFIRM' }),
+    }),
+};
+
+export const account = {
+  changePassword: (current: string, next: string) =>
+    req<{ ok: boolean }>('/api/account/password', {
+      method: 'POST',
+      body: JSON.stringify({ current, next }),
+    }),
 };
 
 // ===== المشاركة العامّة (بلا تسجيل دخول) =====
@@ -275,7 +399,7 @@ export function uploadFile(
 
 // ===== أحداث لحظية (SSE) =====
 export function connectEvents(onJob: (job: ApiJob) => void): () => void {
-  const es = new EventSource('/api/events', { withCredentials: true });
+  const es = new EventSource(apiUrl('/api/events'), { withCredentials: true });
   es.addEventListener('job', (e) => {
     try {
       onJob(JSON.parse((e as MessageEvent).data));
@@ -307,8 +431,11 @@ export function formatRelative(ts: number): string {
   return new Date(ts).toLocaleDateString();
 }
 
-export function toFileItem(f: ApiFile, username = 'المالك'): FileItem {
-  const initials = username.slice(0, 2).toUpperCase();
+export function toFileItem(f: ApiFile, retentionDays = 30): FileItem {
+  const deletedDaysLeft =
+    f.isDeleted && f.trashedAt
+      ? Math.max(0, retentionDays - Math.floor((Date.now() - f.trashedAt) / 86_400_000))
+      : undefined;
   return {
     id: f.id,
     name: f.name,
@@ -317,16 +444,14 @@ export function toFileItem(f: ApiFile, username = 'المالك'): FileItem {
     size: formatSize(f.sizeBytes),
     sizeBytes: f.sizeBytes,
     modified: formatRelative(f.modified),
-    securityTier: 'Zero-Knowledge',
-    tags: f.source === 'ytdlp' || f.source === 'url' ? [{ label: 'تحميل', color: 'bg-surface-container-high text-secondary-fixed' }] : [],
-    collaborators: [{ name: username, initials, role: 'Owner' }],
+    modifiedTs: f.modified,
     sha256: f.sha256 ?? '',
-    path: `/${f.name}`,
     parentId: f.folderId ?? undefined,
     isStarred: f.isStarred,
     isPinned: f.isPinned,
     isDeleted: f.isDeleted,
-    deletedDaysLeft: f.isDeleted ? 30 : undefined,
+    trashedAt: f.trashedAt ?? undefined,
+    deletedDaysLeft,
     previewUrl: f.hasThumbnail ? files.thumbUrl(f.id) : undefined,
     technicalSpecs: f.type === 'video' ? {
       resolution: f.width && f.height ? `${f.width} × ${f.height}` : undefined,

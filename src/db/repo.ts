@@ -134,6 +134,7 @@ export interface ShareRow {
   download_count: number;
   views_count: number;
   revoked: number;
+  ip_allow: string | null;
   created_at: number;
 }
 
@@ -719,6 +720,7 @@ export const Shares = {
     password_hash?: string | null;
     expires_at?: number | null;
     max_downloads?: number | null;
+    ip_allow?: string | null;
   }): ShareRow {
     const db = getDb();
     const row: ShareRow = {
@@ -734,11 +736,12 @@ export const Shares = {
       download_count: 0,
       views_count: 0,
       revoked: 0,
+      ip_allow: input.ip_allow ?? null,
       created_at: now(),
     };
     db.prepare(
-      `INSERT INTO shares (id,user_id,file_id,folder_id,token,label,password_hash,expires_at,max_downloads,download_count,views_count,revoked,created_at)
-       VALUES (@id,@user_id,@file_id,@folder_id,@token,@label,@password_hash,@expires_at,@max_downloads,@download_count,@views_count,@revoked,@created_at)`,
+      `INSERT INTO shares (id,user_id,file_id,folder_id,token,label,password_hash,expires_at,max_downloads,download_count,views_count,revoked,ip_allow,created_at)
+       VALUES (@id,@user_id,@file_id,@folder_id,@token,@label,@password_hash,@expires_at,@max_downloads,@download_count,@views_count,@revoked,@ip_allow,@created_at)`,
     ).run(row);
     return row;
   },
@@ -750,6 +753,11 @@ export const Shares = {
   },
   listByUser(user_id: string): ShareRow[] {
     return getDb().prepare('SELECT * FROM shares WHERE user_id = ? ORDER BY created_at DESC').all(user_id) as ShareRow[];
+  },
+  listByFile(user_id: string, file_id: string): ShareRow[] {
+    return getDb()
+      .prepare('SELECT * FROM shares WHERE user_id = ? AND file_id = ? ORDER BY created_at DESC')
+      .all(user_id, file_id) as ShareRow[];
   },
   revoke(id: string): void {
     getDb().prepare('UPDATE shares SET revoked = 1 WHERE id = ?').run(id);

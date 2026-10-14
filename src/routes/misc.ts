@@ -13,12 +13,26 @@ import { hashPassword, verifyPassword } from '../services/auth.ts';
 import { version as ytdlpVersion, update as ytdlpUpdate, cookiesFilePath } from '../services/ytdlp.ts';
 import { ffmpegAvailable } from '../services/ffmpeg.ts';
 import { checkConnection as tgCheck } from '../services/telegram.ts';
+import { Files } from '../db/repo.ts';
+import { Activity } from '../services/activity.ts';
 
 const DEFAULT_SETTINGS = {
   theme: 'dark',
   defaultView: 'grid',
   thumbnailsEnabled: true,
+  retentionDays: 30,
+  quotaBytes: 5_000_000_000_000,
 };
+const settingsSchema = z
+  .object({
+    theme: z.enum(['dark', 'light']),
+    defaultView: z.enum(['grid', 'list']),
+    thumbnailsEnabled: z.boolean(),
+    retentionDays: z.number().int().min(1).max(3650),
+    quotaBytes: z.number().int().min(1_000_000).max(Number.MAX_SAFE_INTEGER),
+  })
+  .partial()
+  .strict();
 
 export default async function miscRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
@@ -31,10 +45,14 @@ export default async function miscRoutes(app: FastifyInstance): Promise<void> {
 
   app.put('/api/settings', async (request) => {
     const user = requireUser(request);
-    const body = parse(z.record(z.string(), z.unknown()), request.body);
+    const body = parse(settingsSchema, request.body);
     const current = (Settings.get(user.id, 'workspace') as Record<string, unknown>) ?? {};
-    const merged = { ...current, ...body };
+    const merged = { ...DEFAULT_SETTINGS, ...current, ...body };
+    if (typeof merged.quotaBytes !== 'number' || merged.quotaBytes < Files.usedBytes(user.id)) {
+      throw errors.badRequest('لا يمكن ضبط الحصة على قيمة أقل من المساحة المستخدمة.');
+    }
     Settings.set(user.id, 'workspace', merged);
+    Activity.record({ userId: user.id, action: 'settings_updated', targetType: 'account', ip: request.ip });
     return { settings: { ...DEFAULT_SETTINGS, ...merged } };
   });
 
@@ -49,6 +67,7 @@ export default async function miscRoutes(app: FastifyInstance): Promise<void> {
     Users.updatePassword(user.id, await hashPassword(body.next));
     // أبطل كل الجلسات الأخرى لإجبار إعادة الدخول
     Sessions.deleteAllForUser(user.id);
+    Activity.record({ userId: user.id, action: 'password_changed', targetType: 'account', ip: request.ip });
     return { ok: true };
   });
 

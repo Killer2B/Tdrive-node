@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { errors } from '../lib/errors.ts';
 import { requireUser } from '../plugins/auth.ts';
 import { Sessions, type SessionRow } from '../db/repo.ts';
+import { Activity } from '../services/activity.ts';
 
 function uaInfo(ua: string | null): { deviceType: 'laptop' | 'desktop' | 'tablet'; name: string } {
   const u = (ua ?? '').toLowerCase();
@@ -58,6 +59,7 @@ export default async function sessionRoutes(app: FastifyInstance): Promise<void>
     const s = Sessions.find(id);
     if (!s || s.user_id !== user.id) throw errors.notFound('الجلسة غير موجودة.');
     Sessions.delete(id);
+    Activity.record({ userId: user.id, action: 'session_revoked', targetType: 'session', targetId: id, ip: request.ip });
     return { ok: true };
   });
 }

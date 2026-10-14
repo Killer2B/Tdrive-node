@@ -5,6 +5,8 @@ import { getLogger } from '../lib/logger.ts';
 import { cleanupExpiredUploads } from './uploads.ts';
 import { runBackup } from './backup.ts';
 import { evictCache } from './chunkstore.ts';
+import { getDb } from '../db/db.ts';
+import { purgeExpiredTrash } from './files.ts';
 
 const TICK_MS = 5 * 60 * 1000; // كل 5 دقائق
 const CLEANUP_INTERVAL_MS = 55 * 60 * 1000; // ~كل ساعة
@@ -30,8 +32,14 @@ async function tick(): Promise<void> {
       const uploads = await cleanupExpiredUploads();
       Jobs.reclaimStale();
       const jobs = Jobs.deleteDoneBefore(now - JOB_RETENTION_MS);
+      const users = getDb().prepare('SELECT id FROM users').all() as Array<{ id: string }>;
+      let purgedTrash = 0;
+      for (const user of users) {
+        const result = await purgeExpiredTrash(user.id);
+        purgedTrash += result.removed;
+      }
       Kv.set('last_cleanup', String(now));
-      log.debug({ sessions, uploads, jobs }, 'تنظيف دوريّ');
+      log.debug({ sessions, uploads, jobs, purgedTrash }, 'تنظيف دوريّ');
     }
 
     // إخلاء كاش القطع المؤكّدة على Telegram عند تجاوز السقف

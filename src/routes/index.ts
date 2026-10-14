@@ -14,6 +14,7 @@ import eventRoutes from './events.ts';
 import shareRoutes from './shares.ts';
 import sessionRoutes from './sessions.ts';
 import miscRoutes from './misc.ts';
+import analyticsRoutes from './analytics.ts';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // صحّة عامّة
@@ -34,6 +35,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await secured.register(shareRoutes);
     await secured.register(sessionRoutes);
     await secured.register(miscRoutes);
+    await secured.register(analyticsRoutes);
   });
 
   // خدمة الواجهة المبنيّة (web/dist) إن وُجدت

@@ -169,7 +169,9 @@ export async function download(
     let finalPath = '';
     let stderr = '';
 
-    const onAbort = (): void => child.kill('SIGKILL');
+    const onAbort = (): void => {
+      child.kill('SIGKILL');
+    };
     opts.signal?.addEventListener('abort', onAbort, { once: true });
 
     const rl = readline.createInterface({ input: child.stdout });

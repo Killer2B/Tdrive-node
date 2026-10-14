@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ExternalLink } from '../../types';
 import * as api from '../../api';
 
@@ -10,271 +10,160 @@ interface CreateShareDrawerProps {
 }
 
 export const CreateShareDrawer: React.FC<CreateShareDrawerProps> = ({ isOpen, onClose, onCreated, target }) => {
-  const [vanity, setVanity] = useState('');
-  const [watermark, setWatermark] = useState(true);
-  const [steganography, setSteganography] = useState(true);
-  const [burnAfterRead, setBurnAfterRead] = useState(false);
+  const [singleDownload, setSingleDownload] = useState(false);
   const [password, setPassword] = useState('');
-  const [ipFilter, setIpFilter] = useState('');
-  const [expiryDays, setExpiryDays] = useState('7 Days');
-  const [isSealing, setIsSealing] = useState(false);
+  const [ipAllow, setIpAllow] = useState('');
+  const [expiry, setExpiry] = useState('7 Days');
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [availableFiles, setAvailableFiles] = useState<api.ApiFile[]>([]);
+  const [filesLoading, setFilesLoading] = useState(false);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [selectedFileId, setSelectedFileId] = useState('');
+  const [filesReload, setFilesReload] = useState(0);
+
+  useEffect(() => {
+    if (!isOpen || target?.fileId) return;
+    let active = true;
+    setFilesLoading(true);
+    setFilesError(null);
+    api.files.list({ view: 'all' })
+      .then(({ files }) => {
+        if (!active) return;
+        const shareableFiles = files.filter((file) => file.type !== 'folder' && file.status === 'ready');
+        setAvailableFiles(shareableFiles);
+        setSelectedFileId((current) => shareableFiles.some((file) => file.id === current) ? current : shareableFiles[0]?.id ?? '');
+      })
+      .catch((cause: unknown) => {
+        if (active) setFilesError(cause instanceof Error ? cause.message : 'Could not load files.');
+      })
+      .finally(() => { if (active) setFilesLoading(false); });
+    return () => { active = false; };
+  }, [isOpen, target?.fileId, filesReload]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
     setError(null);
-    if (!target?.fileId) {
-      setError('اختر ملفًّا للمشاركة أولًا (من «الملفّات» ← زرّ المشاركة على الملف).');
+    const fileId = target?.fileId ?? selectedFileId;
+    if (!fileId) {
+      setError('Choose a file from the file list before creating a share.');
       return;
     }
-    setIsSealing(true);
+    setSaving(true);
     try {
-      const expiresDays =
-        expiryDays === '24 Hours' ? 1 : expiryDays === '7 Days' ? 7 : expiryDays === '30 Days' ? 30 : undefined;
-      const res = await api.shares.create({
-        fileId: target.fileId,
-        password: password.trim() ? password.trim() : undefined,
+      const expiresDays = expiry === 'No expiry' ? undefined : expiry === '24 Hours' ? 1 : expiry === '7 Days' ? 7 : 30;
+      const result = await api.shares.create({
+        fileId,
+        password: password.trim() || undefined,
         expiresDays,
-        maxDownloads: burnAfterRead ? 1 : undefined,
-        label: target.name,
+        maxDownloads: singleDownload ? 1 : undefined,
+        label: target?.name ?? availableFiles.find((file) => file.id === fileId)?.name,
+        ipAllow: ipAllow.trim() || undefined,
       });
-      onCreated(res.link);
+      onCreated(result.link);
       onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'تعذّر إنشاء المشاركة');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Could not create the share.');
     } finally {
-      setIsSealing(false);
+      setSaving(false);
     }
   };
 
   return (
     <div className="fixed inset-0 bg-background/80 backdrop-blur-md z-50 flex justify-end animate-in fade-in duration-200">
-      <div 
-        className="w-full max-w-xl bg-surface-container-low border-l border-white/10 shadow-2xl flex flex-col h-full animate-in slide-in-from-right duration-300"
-      >
-        {/* Drawer Header */}
+      <section className="w-full max-w-xl bg-surface-container-low border-l border-white/10 shadow-2xl flex flex-col h-full animate-in slide-in-from-right duration-300">
         <div className="p-5 bg-surface-container flex items-center justify-between border-b border-white/5">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-primary-container text-on-primary-container flex items-center justify-center shadow-md">
-              <span className="material-symbols-outlined text-lg">shield_with_heart</span>
+              <span className="material-symbols-outlined text-lg">share</span>
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-on-surface">Provision Secure Share Enclave</h3>
-              <span className="font-mono text-xs text-outline">Zero-Knowledge Token Configuration</span>
+              <h3 className="text-lg font-semibold text-on-surface">Create secure share</h3>
+              <span className="font-mono text-xs text-outline">Configure file access and expiration</span>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1 rounded-lg hover:bg-surface-container-high text-outline hover:text-on-surface transition-colors"
-          >
+          <button type="button" onClick={onClose} disabled={saving} aria-label="Close" className="p-1 rounded-lg hover:bg-surface-container-high text-outline hover:text-on-surface transition-colors">
             <span className="material-symbols-outlined text-xl">close</span>
           </button>
         </div>
 
-        {/* Drawer Form Body */}
         <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Target Selection */}
           <div className="space-y-1.5">
-            <label className="block font-mono text-xs text-on-surface-variant uppercase tracking-wider">
-              Vault or Files to Mount
-            </label>
+            <label className="block font-mono text-xs text-on-surface-variant uppercase tracking-wider">File to share</label>
             <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-container-lowest border border-white/5">
               <div className="flex items-center gap-3">
-                <span className="material-symbols-outlined text-primary text-2xl">folder_zip</span>
+                <span className="material-symbols-outlined text-primary text-2xl">insert_drive_file</span>
                 <div>
-                  <span className="text-sm font-medium text-on-surface block">{target?.name ?? 'لم يُحدَّد ملف'}</span>
-                  <span className="font-mono text-xs text-outline">
-                    {target?.fileId ? 'جاهز للمشاركة' : 'افتح ملفًّا من القائمة واضغط «مشاركة»'}
-                  </span>
+                  {target?.fileId ? (
+                    <>
+                      <span className="text-sm font-medium text-on-surface block">{target.name}</span>
+                      <span className="font-mono text-xs text-outline">Ready to share</span>
+                    </>
+                  ) : (
+                    <select value={selectedFileId} onChange={(event) => setSelectedFileId(event.target.value)} disabled={filesLoading || !availableFiles.length} className="max-w-64 bg-transparent text-sm font-medium text-on-surface focus:outline-none">
+                      {!availableFiles.length && <option value="">{filesLoading ? 'Loading files…' : 'No files available'}</option>}
+                      {availableFiles.map((file) => <option key={file.id} value={file.id}>{file.name}</option>)}
+                    </select>
+                  )}
                 </div>
               </div>
-              <span className="font-mono text-xs text-secondary-fixed bg-surface-container-high px-2 py-0.5 rounded">
-                {target?.fileId ? 'محدَّد' : '—'}
+              <span className="font-mono text-xs text-secondary-fixed bg-surface-container-high px-2 py-0.5 rounded">{target?.fileId || selectedFileId ? 'Selected' : '—'}</span>
+            </div>
+            {filesError && <div role="alert" className="flex justify-between gap-3 text-xs text-error"><span>{filesError}</span><button type="button" onClick={() => setFilesReload((value) => value + 1)} className="underline">Retry</button></div>}
+            <p className="font-mono text-xs text-outline">The server will generate a unique share URL after creation.</p>
+          </div>
+
+          <section className="space-y-3">
+            <span className="font-mono text-xs text-outline uppercase tracking-wider">Access controls</span>
+            <label className="block p-3.5 rounded-xl bg-surface-container border border-white/5 space-y-2">
+              <span className="text-sm font-medium text-on-surface flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-primary text-lg">password</span> Optional password
               </span>
-            </div>
-          </div>
-
-          {/* Custom Vanity URL */}
-          <div className="space-y-1.5">
-            <label className="block font-mono text-xs text-on-surface-variant uppercase tracking-wider">
-              Custom Vanity Access URL
+              <input type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} maxLength={256} className="w-full bg-surface-container-lowest text-on-surface font-mono text-sm px-3 py-2 rounded-lg border border-white/5 focus:outline-none focus:border-primary-container" placeholder="Set a password" />
+              <span className="block text-xs text-outline">The server stores a password hash, not the plain-text password.</span>
             </label>
-            <div className="flex items-center bg-surface-container-lowest border border-white/5 rounded-lg px-3 focus-within:border-primary-container transition-colors">
-              <span className="font-mono text-sm text-outline">vaulta.to/p/</span>
-              <input
-                type="text"
-                value={vanity}
-                onChange={(e) => setVanity(e.target.value)}
-                required
-                className="w-full bg-transparent text-on-surface font-mono text-sm py-2.5 pl-1 border-0 focus:outline-none"
-              />
-            </div>
-          </div>
 
-          {/* Security Guardrails Section */}
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="font-mono text-xs text-outline uppercase tracking-wider">Security Controls & DRM</span>
-              <span className="font-mono text-xs text-secondary-fixed">POLICY: ULTRA-SECURE</span>
-            </div>
+            <label className="block p-3.5 rounded-xl bg-surface-container border border-white/5 space-y-2">
+              <span className="text-sm font-medium text-on-surface flex items-center gap-1.5">
+                <span className="material-symbols-outlined text-outline text-lg">lan</span> IP addresses or CIDR ranges
+              </span>
+              <input type="text" value={ipAllow} onChange={(event) => setIpAllow(event.target.value)} maxLength={4096} className="w-full bg-surface-container-lowest text-on-surface font-mono text-sm px-3 py-2 rounded-lg border border-white/5 focus:outline-none focus:border-primary-container placeholder:text-outline" placeholder="e.g. 192.168.1.5, 192.168.1.0/24" />
+              <span className="block text-xs text-outline">Comma-separated IPs or CIDR ranges. Leave blank to allow any IP.</span>
+            </label>
 
-            {/* Dynamic Watermark */}
-            <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-container border border-white/5">
-              <div className="flex items-start gap-3 pr-4">
-                <span className="material-symbols-outlined text-primary mt-0.5 text-xl">branding_watermark</span>
-                <div>
-                  <span className="text-sm font-medium text-on-surface block">Dynamic Visual Watermarking</span>
-                  <span className="text-xs text-outline">
-                    Burns viewer's IP, email hash, and timestamp dynamically across every document and video frame.
-                  </span>
-                </div>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                <input
-                  type="checkbox"
-                  checked={watermark}
-                  onChange={(e) => setWatermark(e.target.checked)}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
-              </label>
-            </div>
+            <label className="flex items-center justify-between p-3.5 rounded-xl bg-surface-container border border-white/5 cursor-pointer">
+              <span>
+                <span className="block text-sm font-medium text-on-surface">Limit to one download</span>
+                <span className="block text-xs text-outline">The download limit is used when a download begins.</span>
+              </span>
+              <input type="checkbox" checked={singleDownload} onChange={(event) => setSingleDownload(event.target.checked)} className="w-4 h-4 accent-primary-container" />
+            </label>
+          </section>
 
-            {/* Anti-Leak Steganographic Tracking */}
-            <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-container border border-white/5">
-              <div className="flex items-start gap-3 pr-4">
-                <span className="material-symbols-outlined text-secondary-fixed mt-0.5 text-xl">fingerprint</span>
-                <div>
-                  <span className="text-sm font-medium text-on-surface block">Anti-Leak Steganographic Tracking</span>
-                  <span className="text-xs text-outline">
-                    Embeds invisible cryptographic micro-patterns into PDFs to trace camera screen captures.
-                  </span>
-                </div>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                <input
-                  type="checkbox"
-                  checked={steganography}
-                  onChange={(e) => setSteganography(e.target.checked)}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
-              </label>
-            </div>
-
-            {/* Burn after reading */}
-            <div className="flex items-center justify-between p-3.5 rounded-xl bg-surface-container border border-white/5">
-              <div className="flex items-start gap-3 pr-4">
-                <span className="material-symbols-outlined text-error mt-0.5 text-xl">local_fire_department</span>
-                <div>
-                  <span className="text-sm font-medium text-on-surface block">Expiring Burn-After-Reading</span>
-                  <span className="text-xs text-outline">
-                    Destroys decrypt keys instantly upon single completed inspection or threshold limit.
-                  </span>
-                </div>
-              </div>
-              <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                <input
-                  type="checkbox"
-                  checked={burnAfterRead}
-                  onChange={(e) => setBurnAfterRead(e.target.checked)}
-                  className="sr-only peer"
-                />
-                <div className="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-error"></div>
-              </label>
-            </div>
-
-            {/* Password Protection */}
-            <div className="p-3.5 rounded-xl bg-surface-container border border-white/5 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-on-surface flex items-center gap-1.5">
-                  <span className="material-symbols-outlined text-primary text-lg">password</span> Passcode Barrier
-                </span>
-                <span className="font-mono text-xs text-secondary-fixed">Argon2id Hash</span>
-              </div>
-              <input
-                type="text"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="w-full bg-surface-container-lowest text-on-surface font-mono text-sm px-3 py-2 rounded-lg border border-white/5 focus:outline-none focus:border-primary-container transition-colors"
-                placeholder="Enter enclave access key"
-              />
-            </div>
-
-            {/* Restrict IP / Domain */}
-            <div className="p-3.5 rounded-xl bg-surface-container border border-white/5 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-medium text-on-surface flex items-center gap-1.5">
-                  <span className="material-symbols-outlined text-outline text-lg">domain</span> Restrict IP CIDR or Verified Domain
-                </span>
-              </div>
-              <input
-                type="text"
-                value={ipFilter}
-                onChange={(e) => setIpFilter(e.target.value)}
-                className="w-full bg-surface-container-lowest text-on-surface font-mono text-sm px-3 py-2 rounded-lg border border-white/5 focus:outline-none focus:border-primary-container transition-colors placeholder:text-outline"
-                placeholder="e.g. 192.168.1.0/24 or @sequoia.com, @accel.com"
-              />
-            </div>
-
-            {/* Expiry Duration Options */}
-            <div className="grid grid-cols-4 gap-2 pt-1">
-              {["24 Hours", "7 Days", "30 Days", "Custom"].map((duration) => (
-                <button
-                  type="button"
-                  key={duration}
-                  onClick={() => setExpiryDays(duration)}
-                  className={`py-2 rounded font-mono text-xs text-center transition-colors ${
-                    expiryDays === duration
-                      ? 'bg-primary-container text-on-primary-container font-semibold shadow-sm'
-                      : 'bg-surface-container text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high'
-                  }`}
-                >
+          <fieldset className="space-y-2">
+            <legend className="font-mono text-xs text-outline uppercase tracking-wider">Link expiration</legend>
+            <div className="grid grid-cols-4 gap-2">
+              {['24 Hours', '7 Days', '30 Days', 'No expiry'].map((duration) => (
+                <button type="button" key={duration} onClick={() => setExpiry(duration)} className={`py-2 rounded font-mono text-xs text-center transition-colors ${expiry === duration ? 'bg-primary-container text-on-primary-container font-semibold shadow-sm' : 'bg-surface-container text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high'}`}>
                   {duration}
                 </button>
               ))}
             </div>
-          </div>
+          </fieldset>
 
-          {error && (
-            <div className="flex items-center gap-2 text-error text-sm bg-error-container/20 border border-error/20 rounded-lg px-3 py-2">
-              <span className="material-symbols-outlined text-base">error</span>
-              <span>{error}</span>
-            </div>
-          )}
+          {error && <div role="alert" className="flex items-center gap-2 text-error text-sm bg-error-container/20 border border-error/20 rounded-lg px-3 py-2"><span className="material-symbols-outlined text-base">error</span><span>{error}</span></div>}
 
-          {/* Drawer Footer Actions */}
           <div className="p-5 bg-surface-container border-t border-white/5 flex items-center justify-between gap-4 -mx-6 -mb-6 mt-6">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={isSealing}
-              className="px-4 py-2.5 rounded-lg hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface font-mono text-xs transition-colors"
-            >
-              Discard Enclave
-            </button>
-            <button
-              type="submit"
-              disabled={isSealing}
-              className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 bg-primary-container hover:bg-secondary-container hover:text-on-secondary-fixed-variant text-on-primary-container font-semibold text-sm rounded-lg shadow-lg shadow-primary-container/20 transition-all cursor-pointer"
-            >
-              {isSealing ? (
-                <>
-                  <span className="material-symbols-outlined text-base animate-spin">sync</span>
-                  <span>Sealing Cryptographic Enclave...</span>
-                </>
-              ) : (
-                <>
-                  <span className="material-symbols-outlined text-base">lock</span>
-                  <span>Generate Cryptographic Share</span>
-                </>
-              )}
+            <button type="button" onClick={onClose} disabled={saving} className="px-4 py-2.5 rounded-lg hover:bg-surface-container-high text-on-surface-variant hover:text-on-surface font-mono text-xs transition-colors">Cancel</button>
+            <button type="submit" disabled={saving || (!target?.fileId && (!selectedFileId || filesLoading || !!filesError))} className="flex-1 flex items-center justify-center gap-2 px-5 py-2.5 bg-primary-container hover:bg-secondary-container hover:text-on-secondary-fixed-variant text-on-primary-container font-semibold text-sm rounded-lg shadow-lg shadow-primary-container/20 transition-all disabled:opacity-50">
+              <span className={`material-symbols-outlined text-base ${saving ? 'animate-spin' : ''}`}>{saving ? 'sync' : 'share'}</span>
+              <span>{saving ? 'Creating share…' : 'Create share'}</span>
             </button>
           </div>
         </form>
-      </div>
+      </section>
     </div>
   );
 };

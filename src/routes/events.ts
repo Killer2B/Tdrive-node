@@ -4,18 +4,26 @@ import { requireUser } from '../plugins/auth.ts';
 import { subscribe, type ProgressEvent } from '../services/progress.ts';
 import { Jobs } from '../db/repo.ts';
 import { toApiJob } from '../services/queue.ts';
+import { loadConfig } from '../config/env.ts';
 
 export default async function eventRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/events', async (request, reply) => {
     const user = requireUser(request);
     reply.hijack();
     const raw = reply.raw;
-    raw.writeHead(200, {
+    const headers: Record<string, string> = {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
-    });
+    };
+    const origin = request.headers.origin;
+    if (origin && loadConfig().security.corsOrigins.includes(origin)) {
+      headers['Access-Control-Allow-Origin'] = origin;
+      headers['Access-Control-Allow-Credentials'] = 'true';
+      headers.Vary = 'Origin';
+    }
+    raw.writeHead(200, headers);
     raw.write('retry: 3000\n\n');
 
     const send = (e: ProgressEvent): void => {

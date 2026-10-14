@@ -1,26 +1,25 @@
 import React, { useState } from 'react';
-import { USER_AVATAR } from '../data/mockData';
+import * as api from '../api';
 
 interface HeaderProps {
   onOpenCommandPalette: () => void;
   viewLayout: 'grid' | 'list';
   onToggleViewLayout: (mode: 'grid' | 'list') => void;
   onFilterClick?: (type: string) => void;
-  onOpenNotifications?: () => void;
+  username: string;
+  notifications: api.ApiActivity[];
 }
 
 export const Header: React.FC<HeaderProps> = ({
   onOpenCommandPalette,
   viewLayout,
   onToggleViewLayout,
-  onFilterClick
+  onFilterClick,
+  username,
+  notifications,
 }) => {
   const [showNotifications, setShowNotifications] = useState(false);
-  const [notifications, setNotifications] = useState([
-    { id: '1', title: 'SHA-256 Verified', desc: 'design_tokens_v4.json passed parity checks.', time: '5m ago' },
-    { id: '2', title: 'New Peer Authenticated', desc: 'MacBook Pro 16" connected via Passkey.', time: '24m ago' },
-    { id: '3', title: 'Replication Node Sync', desc: 'Frankfurt-01 Sovereign Cluster verified block #14,892,109.', time: '1h ago' }
-  ]);
+  const initials = username.slice(0, 2).toLocaleUpperCase();
 
   return (
     <header className="fixed top-0 left-72 right-0 h-16 bg-surface-container-lowest/80 backdrop-blur-xl z-40 border-b border-white/5 shadow-[0_1px_8px_rgba(0,0,0,0.04)]">
@@ -37,7 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
             <input
               type="text"
               readOnly
-              placeholder="Omnisearch files, tags, metadata or vaults..."
+              placeholder="Search files by name, type, or checksum..."
               className="w-full bg-surface-container-low text-on-surface placeholder:text-outline font-sans text-sm pl-10 pr-20 py-2 rounded-lg border border-white/5 group-hover:border-white/10 group-hover:bg-surface-container transition-all cursor-pointer"
             />
             <div className="absolute right-2.5 flex items-center gap-1">
@@ -64,7 +63,7 @@ export const Header: React.FC<HeaderProps> = ({
               onClick={() => onFilterClick && onFilterClick('People')}
               className="px-2.5 py-1 font-mono text-xs rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-colors"
             >
-              People
+              Shares
             </button>
             <button
               type="button"
@@ -77,10 +76,10 @@ export const Header: React.FC<HeaderProps> = ({
 
           <div className="h-4 w-px bg-surface-container-highest hidden md:block"></div>
 
-          {/* Zero-Knowledge Status */}
+          {/* Authenticated session status */}
           <div className="hidden lg:flex items-center gap-1.5 font-mono text-xs text-outline">
             <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim"></span>
-            <span>Zero-Knowledge Encrypted</span>
+            <span>Authenticated session</span>
           </div>
 
           <div className="h-4 w-px bg-surface-container-highest hidden lg:block"></div>
@@ -131,23 +130,24 @@ export const Header: React.FC<HeaderProps> = ({
                 <div className="flex items-center justify-between pb-2 border-b border-white/5">
                   <span className="font-mono text-xs text-on-surface uppercase font-semibold">Security Alerts</span>
                   <button
-                    onClick={() => setNotifications([])}
+                    type="button"
+                    onClick={() => setShowNotifications(false)}
                     className="text-[11px] font-mono text-primary hover:underline"
                   >
-                    Clear All
+                    Close
                   </button>
                 </div>
                 <div className="py-2 space-y-2 max-h-60 overflow-y-auto">
                   {notifications.length === 0 ? (
-                    <p className="text-xs text-outline py-3 text-center">No unread security alerts</p>
+                    <p className="text-xs text-outline py-3 text-center">No recent activity.</p>
                   ) : (
-                    notifications.map(n => (
+                    notifications.slice(0, 10).map((n) => (
                       <div key={n.id} className="p-2 rounded-lg bg-surface-container-lowest text-xs space-y-0.5">
                         <div className="flex items-center justify-between">
-                          <span className="font-semibold text-on-surface">{n.title}</span>
-                          <span className="font-mono text-[10px] text-outline">{n.time}</span>
+                          <span className="font-semibold text-on-surface">{n.action.replaceAll('_', ' ')}</span>
+                          <span className="font-mono text-[10px] text-outline">{api.formatRelative(n.at)}</span>
                         </div>
-                        <p className="text-outline text-[11px]">{n.desc}</p>
+                        <p className="text-outline text-[11px]">{n.targetName ?? n.targetType ?? 'Workspace'}</p>
                       </div>
                     ))
                   )}
@@ -157,12 +157,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Avatar */}
-          <img
-            src={USER_AVATAR}
-            alt="Alex Rivera"
-            referrerPolicy="no-referrer"
-            className="w-8 h-8 rounded-full object-cover ring-1 ring-white/10"
-          />
+          <span aria-label={username} title={username} className="w-8 h-8 rounded-full bg-primary-container text-on-primary-container ring-1 ring-white/10 flex items-center justify-center text-[11px] font-semibold">{initials}</span>
         </div>
       </div>
     </header>

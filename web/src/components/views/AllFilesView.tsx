@@ -1,11 +1,15 @@
-import React, { useState } from 'react';
-import { FileItem, FileCategory } from '../../types';
-import { VIDEO_PREVIEW_IMG } from '../../data/mockData';
+import React, { useEffect, useState } from 'react';
+import { ExternalLink, FileItem, FileCategory } from '../../types';
 import * as api from '../../api';
 import { VideoPlayer } from '../VideoPlayer';
 
 interface AllFilesViewProps {
   files: FileItem[];
+  viewLayout: 'grid' | 'list';
+  shareRevision: number;
+  isLoading: boolean;
+  loadError: string | null;
+  onRetry: () => void;
   selectedFile: FileItem | null;
   onSelectFile: (file: FileItem) => void;
   onDeleteFiles: (ids: string[]) => void;
@@ -13,11 +17,16 @@ interface AllFilesViewProps {
   onOpenUpload: () => void;
   onOpenCreateShare: (target?: { fileId?: string; name?: string }) => void;
   onCopyChecksum: (hash: string) => void;
-  onRestoreVersion: (version: string) => void;
+  onExportAuditLogs: () => void;
 }
 
 export const AllFilesView: React.FC<AllFilesViewProps> = ({
   files,
+  viewLayout,
+  shareRevision,
+  isLoading,
+  loadError,
+  onRetry,
   selectedFile,
   onSelectFile,
   onDeleteFiles,
@@ -25,15 +34,17 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
   onOpenUpload,
   onOpenCreateShare,
   onCopyChecksum,
-  onRestoreVersion
+  onExportAuditLogs,
 }) => {
   const [activeCategory, setActiveCategory] = useState<'all' | FileCategory>('all');
-  const [selectedIds, setSelectedIds] = useState<string[]>(['f-3']);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [sortBy, setSortBy] = useState<'modified' | 'size' | 'name'>('modified');
   const [isInspectorOpen, setIsInspectorOpen] = useState(true);
-  const [isPlayingVideo, setIsPlayingVideo] = useState(false);
-  const [videoScrub, setVideoScrub] = useState(40);
-  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [fileShares, setFileShares] = useState<ExternalLink[]>([]);
+  const [fileActivity, setFileActivity] = useState<api.ApiActivity[]>([]);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [detailsReload, setDetailsReload] = useState(0);
 
   // Filtered files
   const filteredFiles = files.filter((file) => {
@@ -42,24 +53,11 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
   }).sort((a, b) => {
     if (sortBy === 'name') return a.name.localeCompare(b.name);
     if (sortBy === 'size') return b.sizeBytes - a.sizeBytes;
-    return 0; // modified
+    return b.modifiedTs - a.modifiedTs;
   });
 
-  const handleToggleSelect = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (selectedIds.includes(id)) {
-      setSelectedIds(selectedIds.filter(i => i !== id));
-    } else {
-      setSelectedIds([...selectedIds, id]);
-    }
-  };
-
   const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.checked) {
-      setSelectedIds(filteredFiles.map(f => f.id));
-    } else {
-      setSelectedIds([]);
-    }
+    setSelectedIds(e.target.checked ? filteredFiles.map((f) => f.id) : []);
   };
 
   const handleRowClick = (file: FileItem) => {
@@ -70,7 +68,34 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
     setIsInspectorOpen(true);
   };
 
-  const activeInspectionFile = selectedFile || files.find(f => f.id === 'f-3') || files[0];
+  const activeInspectionFile = selectedFile && files.some((file) => file.id === selectedFile.id)
+    ? selectedFile
+    : files[0];
+
+  useEffect(() => {
+    if (!activeInspectionFile) {
+      setFileShares([]);
+      setFileActivity([]);
+      return;
+    }
+    let active = true;
+    setDetailsLoading(true);
+    setDetailsError(null);
+    Promise.all([
+      api.shares.forFile(activeInspectionFile.id),
+      api.activity.list({ fileId: activeInspectionFile.id, limit: 10 }),
+    ])
+      .then(([shares, activity]) => {
+        if (!active) return;
+        setFileShares(shares.shares);
+        setFileActivity(activity.items);
+      })
+      .catch((error: unknown) => {
+        if (active) setDetailsError(error instanceof Error ? error.message : 'Could not load file details.');
+      })
+      .finally(() => { if (active) setDetailsLoading(false); });
+    return () => { active = false; };
+  }, [activeInspectionFile?.id, detailsReload, shareRevision]);
 
   return (
     <div className="flex flex-col w-full min-h-screen">
@@ -80,21 +105,17 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
           <nav className="flex items-center gap-1.5 font-mono text-xs text-outline">
             <span className="flex items-center gap-1 text-outline">
               <span className="material-symbols-outlined text-sm">dns</span>
-              Vaulta
+              Workspace
             </span>
             <span className="material-symbols-outlined text-sm text-outline-variant">chevron_right</span>
-            <span className="hover:text-primary transition-colors cursor-pointer">Workspace Projects</span>
-            <span className="material-symbols-outlined text-sm text-outline-variant">chevron_right</span>
-            <span className="hover:text-primary transition-colors cursor-pointer">2025 Rebrand & Identity</span>
-            <span className="material-symbols-outlined text-sm text-outline-variant">chevron_right</span>
             <span className="text-on-surface font-medium bg-surface-container-high px-2 py-0.5 rounded">
-              Deliverables
+              {activeInspectionFile?.name ?? 'All files'}
             </span>
           </nav>
           <div className="h-3.5 w-px bg-surface-container-highest mx-1 hidden md:block"></div>
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container text-secondary text-xs font-mono">
             <span className="w-1.5 h-1.5 rounded-full bg-secondary-container animate-pulse"></span>
-            Zero-Knowledge Synchronized
+            Server-managed storage
           </div>
         </div>
 
@@ -102,11 +123,11 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
         <div className="flex items-center gap-2">
           <button
             type="button"
-                onClick={() => undefined}
+            onClick={onExportAuditLogs}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-mono rounded shadow-sm transition-all cursor-pointer"
           >
             <span className="material-symbols-outlined text-base">lock_open</span>
-            <span>Audit Logs</span>
+            <span>Export Activity</span>
           </button>
           <button
             type="button"
@@ -227,7 +248,9 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
             <span className="material-symbols-outlined text-sm text-outline">sort</span>
             <select
               value={sortBy}
-              onChange={(e) => setSortBy(e.target.value as any)}
+              onChange={(e) => {
+                if (e.target.value === 'modified' || e.target.value === 'size' || e.target.value === 'name') setSortBy(e.target.value);
+              }}
               className="bg-transparent font-mono text-xs text-on-surface focus:outline-none cursor-pointer pr-1"
             >
               <option value="modified" className="bg-surface-container-high text-on-surface">Last modified</option>
@@ -256,21 +279,10 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
       {/* Primary Workspace Canvas: Split Layout (Table + Right Inspector) */}
       <div className="flex-1 flex flex-col xl:flex-row w-full overflow-hidden">
         {/* Central Explorer Table Area */}
-        <div
-          onDragOver={(e) => { e.preventDefault(); setIsDraggingOver(true); }}
-          onDragLeave={() => setIsDraggingOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setIsDraggingOver(false);
-            onOpenUpload();
-          }}
-          className={`flex-1 overflow-x-auto min-w-0 bg-surface transition-colors ${
-            isDraggingOver ? 'bg-primary-container/5' : ''
-          }`}
-        >
-          <div className="min-w-[780px]">
+        <div className="flex-1 overflow-x-auto min-w-0 bg-surface">
+          <div className={viewLayout === 'list' ? 'min-w-[780px]' : ''}>
             {/* Table Header Bar */}
-            <div className="grid grid-cols-[40px_minmax(240px,2.5fr)_130px_100px_160px_120px_130px_48px] items-center px-6 py-2 bg-surface-container-lowest font-mono text-[11px] text-outline uppercase tracking-wider select-none border-b border-white/5">
+            {viewLayout === 'list' && <div className="grid grid-cols-[40px_minmax(240px,2.5fr)_130px_100px_160px_48px] items-center px-6 py-2 bg-surface-container-lowest font-mono text-[11px] text-outline uppercase tracking-wider select-none border-b border-white/5">
               <div className="flex items-center justify-center">
                 <input
                   type="checkbox"
@@ -283,25 +295,29 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                 <span>Name</span>
                 <span className="material-symbols-outlined text-sm">arrow_downward</span>
               </div>
-              <div>Tags</div>
+              <div>Type</div>
               <div>Size</div>
-              <div>Security Tier</div>
-              <div>Collaborators</div>
               <div>Modified</div>
               <div className="text-right">Action</div>
-            </div>
+            </div>}
 
             {/* Directory Rows */}
-            <div className="flex flex-col divide-y divide-white/5">
-              {filteredFiles.map((file) => {
+            <div className={viewLayout === 'grid' ? 'grid grid-cols-1 sm:grid-cols-2 gap-3 p-4' : 'flex flex-col divide-y divide-white/5'}>
+              {isLoading && files.length === 0 ? (
+                <div className="p-12 text-center text-sm text-outline" role="status">Loading files…</div>
+              ) : loadError && files.length === 0 ? (
+                <div role="alert" className="p-12 text-center space-y-3"><p className="text-sm text-error">{loadError}</p><button type="button" onClick={onRetry} className="text-primary text-sm underline">Retry</button></div>
+              ) : filteredFiles.length === 0 ? (
+                <div className="p-12 text-center text-sm text-outline">No files match the selected category.</div>
+              ) : filteredFiles.map((file) => {
                 const isSelected = selectedIds.includes(file.id);
-                const isInspected = activeInspectionFile.id === file.id;
+                const isInspected = activeInspectionFile?.id === file.id;
 
                 return (
                   <div
                     key={file.id}
                     onClick={() => handleRowClick(file)}
-                    className={`grid grid-cols-[40px_minmax(240px,2.5fr)_130px_100px_160px_120px_130px_48px] items-center px-6 py-2.5 transition-colors group cursor-pointer relative ${
+                    className={`grid ${viewLayout === 'grid' ? 'grid-cols-[40px_minmax(0,1fr)] rounded-xl border border-white/5 p-4' : 'grid-cols-[40px_minmax(240px,2.5fr)_130px_100px_160px_48px] px-6 py-2.5'} items-center transition-colors group cursor-pointer relative ${
                       isInspected
                         ? 'bg-surface-container-high shadow-inner'
                         : 'bg-surface hover:bg-surface-container-low'
@@ -317,8 +333,12 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                       <input
                         type="checkbox"
                         checked={isSelected}
-                        onClick={(e) => handleToggleSelect(file.id, e)}
-                        onChange={() => {}}
+                        onChange={(e) => {
+                          e.stopPropagation();
+                          setSelectedIds((current) => current.includes(file.id)
+                            ? current.filter((id) => id !== file.id)
+                            : [...current, file.id]);
+                        }}
                         className="w-3.5 h-3.5 rounded-sm bg-surface-container-high accent-primary-container cursor-pointer"
                       />
                     </div>
@@ -347,68 +367,28 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                           {file.name}
                         </p>
                         <span className="font-mono text-xs text-outline">
-                          {file.extension ? `${file.extension.toUpperCase()} · Master` : `${file.size} total`}
+                          {file.extension ? `.${file.extension.toUpperCase()}` : file.type}
                         </span>
                       </div>
                     </div>
 
-                    {/* Tags */}
-                    <div>
-                      {file.tags[0] && (
-                        <span className={`px-2 py-0.5 rounded font-mono text-[11px] inline-flex items-center gap-1 ${file.tags[0].color}`}>
-                          <span className="w-1 h-1 rounded-full bg-current"></span>
-                          {file.tags[0].label}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Size */}
-                    <div className="font-mono text-xs text-on-surface font-medium">
-                      {file.size}
-                    </div>
-
-                    {/* Security Tier */}
-                    <div>
-                      <span className="inline-flex items-center gap-1 font-mono text-xs text-secondary">
-                        <span className="material-symbols-outlined text-sm text-secondary-fixed-dim">
-                          {file.securityTier === 'Zero-Knowledge' ? 'enhanced_encryption' :
-                           file.securityTier === 'Hardware Key' ? 'verified_user' : 'lock'}
-                        </span>
-                        {file.securityTier}
-                      </span>
-                    </div>
-
-                    {/* Collaborators */}
-                    <div className="flex items-center -space-x-1.5">
-                      {file.collaborators.map((c, i) => (
-                        <span
-                          key={i}
-                          title={`${c.name} (${c.role})`}
-                          className="w-6 h-6 rounded-full bg-primary-container text-on-primary-container font-mono text-[10px] flex items-center justify-center font-bold ring-1 ring-background"
+                    <div className={viewLayout === 'grid' ? 'col-span-2 grid grid-cols-2 gap-2 mt-2 pt-3 border-t border-white/5' : 'contents'}>
+                      <div className="font-mono text-xs text-on-surface-variant">{file.type}</div>
+                      <div className="font-mono text-xs text-on-surface font-medium">{file.size}</div>
+                      <div className="font-mono text-xs text-outline truncate">{file.modified}</div>
+                      <div className="text-right">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onDownloadFile(file);
+                          }}
+                          className="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container transition-colors"
+                          title="Download file"
                         >
-                          {c.initials}
-                        </span>
-                      ))}
-                    </div>
-
-                    {/* Modified */}
-                    <div className="font-mono text-xs text-outline truncate">
-                      {file.modified}
-                    </div>
-
-                    {/* Action */}
-                    <div className="text-right">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onDownloadFile(file);
-                        }}
-                        className="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container transition-colors"
-                        title="Download sample"
-                      >
-                        <span className="material-symbols-outlined text-lg">download</span>
-                      </button>
+                          <span className="material-symbols-outlined text-lg">download</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -423,9 +403,9 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                 <span className="material-symbols-outlined text-2xl">upload_file</span>
               </div>
               <div>
-                <h4 className="text-base text-on-surface font-semibold">Drag & Drop Assets to Ingest</h4>
+                <h4 className="text-base text-on-surface font-semibold">Upload files to this workspace</h4>
                 <p className="text-xs text-outline mt-0.5">
-                  Hardware-accelerated AES-256 client-side chunking. Maximum single object payload 500 GB.
+                  Files are uploaded to the server using its configured chunk size and storage backend.
                 </p>
               </div>
             </div>
@@ -435,14 +415,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                 onClick={onOpenUpload}
                 className="px-4 py-2 bg-surface-container hover:bg-surface-container-high text-on-surface font-mono text-xs rounded transition-colors cursor-pointer"
               >
-                Browse Directory
-              </button>
-              <button
-                type="button"
-                onClick={onOpenUpload}
-                className="px-4 py-2 bg-primary-container hover:bg-secondary-container text-on-primary-container hover:text-on-secondary-fixed-variant font-mono text-xs font-semibold rounded shadow-md transition-all cursor-pointer"
-              >
-                Direct CLI Upload
+                Select files
               </button>
             </div>
           </div>
@@ -484,7 +457,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                   <VideoPlayer
                     key={activeInspectionFile.id}
                     src={api.files.streamUrl(activeInspectionFile.id)}
-                    poster={activeInspectionFile.previewUrl || VIDEO_PREVIEW_IMG}
+                    poster={activeInspectionFile.previewUrl}
                   />
                 ) : activeInspectionFile.type === 'design' ? (
                   <img
@@ -545,19 +518,13 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
               <div className="p-4 rounded-xl bg-surface-container border border-white/5 space-y-3 shadow-inner">
                 <div className="flex items-center justify-between pb-1">
                   <span className="font-mono text-xs text-outline uppercase tracking-wider">Technical Specs</span>
-                  <span className="font-mono text-xs text-secondary-fixed-dim font-medium">Verified</span>
+                  <span className="font-mono text-xs text-outline">{activeInspectionFile.type}</span>
                 </div>
                 <div className="grid grid-cols-2 gap-y-1.5 font-mono text-xs">
-                  <div className="text-outline">Resolution</div>
-                  <div className="text-on-surface text-right">{activeInspectionFile.technicalSpecs?.resolution || '3840 × 2160 (UHD)'}</div>
-                  <div className="text-outline">Color Space</div>
-                  <div className="text-on-surface text-right">{activeInspectionFile.technicalSpecs?.colorSpace || 'DCI-P3 / Wide Gamut'}</div>
-                  <div className="text-outline">Framerate</div>
-                  <div className="text-on-surface text-right">{activeInspectionFile.technicalSpecs?.framerate || '24.000 fps TC'}</div>
-                  <div className="text-outline">Bit Depth</div>
-                  <div className="text-on-surface text-right">{activeInspectionFile.technicalSpecs?.bitDepth || '12-bit Quantized'}</div>
-                  <div className="text-outline">Encryption</div>
-                  <div className="text-secondary text-right">{activeInspectionFile.technicalSpecs?.encryption || 'AES-256-GCM'}</div>
+                  <div className="text-outline">File size</div><div className="text-on-surface text-right">{activeInspectionFile.size}</div>
+                  <div className="text-outline">MIME type</div><div className="text-on-surface text-right break-all">{activeInspectionFile.type}</div>
+                  {activeInspectionFile.technicalSpecs?.resolution && <><div className="text-outline">Resolution</div><div className="text-on-surface text-right">{activeInspectionFile.technicalSpecs.resolution}</div></>}
+                  <div className="text-outline">Last updated</div><div className="text-on-surface text-right">{new Date(activeInspectionFile.modifiedTs).toLocaleString()}</div>
                 </div>
 
                 <div className="pt-2 border-t border-white/5">
@@ -566,6 +533,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                     <button
                       type="button"
                       onClick={() => onCopyChecksum(activeInspectionFile.sha256)}
+                      disabled={!activeInspectionFile.sha256}
                       className="text-primary hover:underline cursor-pointer"
                     >
                       Copy
@@ -577,10 +545,10 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                 </div>
               </div>
 
-              {/* Access & Permissions Section */}
+              {/* Actual shares */}
               <div className="p-4 rounded-xl bg-surface-container border border-white/5 space-y-3 shadow-inner">
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs text-outline uppercase tracking-wider">Access & Permissions</span>
+                  <span className="font-mono text-xs text-outline uppercase tracking-wider">Share Links</span>
                   <button
                     type="button"
                     onClick={() => onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name })}
@@ -589,99 +557,32 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                     + Manage
                   </button>
                 </div>
-
-                {/* Password Protected Link Toggle Box */}
-                <div className="p-2.5 rounded-lg bg-surface-container-low border border-white/5 flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    <span className="material-symbols-outlined text-secondary-fixed-dim text-lg">link</span>
-                    <div>
-                      <p className="text-xs text-on-surface font-medium leading-none">Password Protected Link</p>
-                      <p className="font-mono text-[10px] text-outline leading-none mt-1">Expires in 7 days · 12 views</p>
-                    </div>
+                {detailsLoading ? <p className="text-xs text-outline">Loading share records…</p> : null}
+                {detailsError ? <div role="alert" className="flex justify-between gap-2 text-xs text-error"><span>{detailsError}</span><button type="button" onClick={() => setDetailsReload((value) => value + 1)} className="underline">Retry</button></div> : null}
+                {!detailsLoading && fileShares.length ? fileShares.map((share) => (
+                  <div key={share.id} className="p-2.5 rounded-lg bg-surface-container-low border border-white/5">
+                    <p className="text-xs text-on-surface truncate">{share.vanityEndpoint}</p>
+                    <p className="font-mono text-[10px] text-outline mt-1">{share.isRevoked ? 'Revoked' : share.isExpired ? 'Expired' : 'Active'} · {share.viewsCount} views · {share.quotaUsed} downloads · {share.expiry}</p>
                   </div>
-                  <span className="px-2 py-0.5 rounded bg-secondary-container text-on-secondary-fixed-variant text-[10px] font-mono font-semibold">
-                    Active
-                  </span>
-                </div>
-
-                {/* Collaborators List */}
-                <div className="space-y-2 pt-1">
-                  {activeInspectionFile.collaborators.map((c, idx) => (
-                    <div key={idx} className="flex items-center justify-between text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 rounded-full bg-surface-container-highest font-mono text-[10px] flex items-center justify-center text-on-surface font-bold">
-                          {c.initials}
-                        </span>
-                        <div>
-                          <p className="text-on-surface font-medium leading-none">{c.name}</p>
-                          <p className="font-mono text-[10px] text-outline leading-none mt-0.5">{c.role}</p>
-                        </div>
-                      </div>
-                      <span className="font-mono text-[11px] text-outline">{c.role === 'Owner' ? 'Admin' : 'Can edit'}</span>
-                    </div>
-                  ))}
-                </div>
+                )) : !detailsLoading && !detailsError ? <p className="text-xs text-outline">No share links for this file.</p> : null}
               </div>
 
-              {/* Version History Timeline */}
+              {/* Current file record */}
               <div className="p-4 rounded-xl bg-surface-container border border-white/5 space-y-3 shadow-inner">
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs text-outline uppercase tracking-wider">Version History</span>
-                  <span className="font-mono text-xs text-secondary-fixed">v3.2 Current</span>
+                  <span className="font-mono text-xs text-outline uppercase tracking-wider">File Record</span>
+                  <span className="font-mono text-xs text-secondary-fixed">{activeInspectionFile.isDeleted ? 'In trash' : 'Stored'}</span>
                 </div>
-                <div className="space-y-3 relative pl-4">
-                  <div className="absolute left-1.5 top-1 bottom-1 w-0.5 bg-surface-container-highest"></div>
-                  
-                  {activeInspectionFile.versionHistory?.map((ver, vidx) => (
-                    <div key={vidx} className="relative">
-                      <span className={`absolute -left-4 top-1 w-2.5 h-2.5 rounded-full ring-4 ring-surface-container ${
-                        ver.isActive ? 'bg-primary-container' : 'bg-surface-container-highest'
-                      }`}></span>
-                      <div className="flex items-center justify-between">
-                        <p className={`text-xs ${ver.isActive ? 'text-on-surface font-semibold' : 'text-on-surface-variant font-medium'}`}>
-                          {ver.version} {ver.isActive && '(Active)'}
-                        </p>
-                        {!ver.isActive ? (
-                          <button
-                            type="button"
-                            onClick={() => onRestoreVersion(ver.version)}
-                            className="text-primary hover:underline font-mono text-[11px] cursor-pointer"
-                          >
-                            Restore
-                          </button>
-                        ) : (
-                          <span className="font-mono text-[11px] text-outline">{ver.timeAgo}</span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-outline">{ver.label}</p>
-                    </div>
-                  )) || (
-                    <div className="text-xs text-outline">v1.0 Ingested original</div>
-                  )}
-                </div>
+                <p className="text-xs text-outline">Last modified {new Date(activeInspectionFile.modifiedTs).toLocaleString()}</p>
               </div>
 
               {/* Activity Audit Trail */}
               <div className="p-4 rounded-xl bg-surface-container border border-white/5 space-y-2.5 shadow-inner">
                 <div className="flex items-center justify-between">
                   <span className="font-mono text-xs text-outline uppercase tracking-wider">Activity Audit Log</span>
-                  <span className="material-symbols-outlined text-sm text-outline">verified</span>
+                  <button type="button" onClick={onExportAuditLogs} className="text-primary text-[11px] hover:underline">Export CSV</button>
                 </div>
-                <div className="space-y-2 text-xs">
-                  {activeInspectionFile.auditLog?.map((log, lidx) => (
-                    <div key={lidx} className="flex items-start gap-2 text-on-surface-variant">
-                      <span className="material-symbols-outlined text-sm text-secondary-fixed-dim mt-0.5">
-                        {lidx === 0 ? 'download' : lidx === 1 ? 'link' : 'cloud_done'}
-                      </span>
-                      <div>
-                        <span>{log.action}</span>
-                        <span className="block text-outline font-mono text-[10px]">{log.timeAgo} · {log.ip}</span>
-                      </div>
-                    </div>
-                  )) || (
-                    <div className="text-xs text-outline">Verified on fra-01 cluster node</div>
-                  )}
-                </div>
+                {fileActivity.length ? <div className="space-y-2 text-xs">{fileActivity.map((item) => <div key={item.id} className="flex items-start gap-2 text-on-surface-variant"><span className="material-symbols-outlined text-sm text-secondary-fixed-dim mt-0.5">history</span><div><span>{item.action.replaceAll('_', ' ')}</span><span className="block text-outline font-mono text-[10px]">{new Date(item.at).toLocaleString()} · {item.ip ?? 'IP unavailable'}</span></div></div>)}</div> : !detailsLoading && <div className="text-xs text-outline">No activity recorded for this file.</div>}
               </div>
             </div>
           </aside>

@@ -7,6 +7,9 @@ interface RecentStarredViewProps {
   onToggleStar: (fileId: string) => void;
   onDownloadFile: (file: FileItem) => void;
   onOpenCreateShare: (target?: { fileId?: string; name?: string }) => void;
+  isLoading: boolean;
+  loadError: string | null;
+  onRetry: () => void;
 }
 
 export const RecentStarredView: React.FC<RecentStarredViewProps> = ({
@@ -14,14 +17,18 @@ export const RecentStarredView: React.FC<RecentStarredViewProps> = ({
   onSelectFile,
   onToggleStar,
   onDownloadFile,
-  onOpenCreateShare
+  onOpenCreateShare,
+  isLoading,
+  loadError,
+  onRetry,
 }) => {
   const [filterMode, setFilterMode] = useState<'all' | 'starred' | 'recent'>('all');
 
+  const recentCutoff = Date.now() - 24 * 60 * 60 * 1000;
   const displayedFiles = files.filter(f => {
     if (filterMode === 'starred') return f.isStarred;
-    if (filterMode === 'recent') return f.modified.includes('m ago') || f.modified.includes('h ago');
-    return f.isStarred || f.isPinned || f.modified.includes('m ago') || f.modified.includes('h ago');
+    if (filterMode === 'recent') return f.modifiedTs >= recentCutoff;
+    return f.isStarred || f.isPinned || f.modifiedTs >= recentCutoff;
   });
 
   return (
@@ -30,13 +37,13 @@ export const RecentStarredView: React.FC<RecentStarredViewProps> = ({
         <div>
           <div className="flex items-center gap-1.5 text-outline font-mono text-xs uppercase tracking-wider mb-1">
             <span className="w-1.5 h-1.5 rounded-full bg-secondary-fixed-dim"></span>
-            <span>Cryptographic Bookmarks & Fast Access</span>
+            <span>Frequently accessed files</span>
           </div>
           <h1 className="text-3xl text-on-surface tracking-tight font-semibold">
-            Recent & Starred Enclaves
+            Recent & Starred Files
           </h1>
           <p className="text-sm text-outline mt-1">
-            Instant zero-knowledge access to pinned assets, hot encryption keys, and starred project deliverables.
+            Review recently updated, pinned, and starred files in this workspace.
           </p>
         </div>
 
@@ -65,8 +72,12 @@ export const RecentStarredView: React.FC<RecentStarredViewProps> = ({
         </div>
       </div>
 
+      {loadError && <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-error/30 bg-error-container/20 p-3 text-sm text-error"><span>{loadError}</span><button type="button" onClick={onRetry} className="underline">Retry</button></div>}
+
       <div className="rounded-xl bg-surface-container-low border border-white/5 divide-y divide-white/5 shadow-xl overflow-hidden">
-        {displayedFiles.length === 0 ? (
+        {isLoading && files.length === 0 ? (
+          <div className="p-12 text-center text-outline font-mono text-sm" role="status">Loading files…</div>
+        ) : loadError && files.length === 0 ? null : displayedFiles.length === 0 ? (
           <div className="p-12 text-center text-outline font-mono text-sm">
             No files match the selected filter.
           </div>
@@ -103,14 +114,12 @@ export const RecentStarredView: React.FC<RecentStarredViewProps> = ({
                     <span className="text-sm text-on-surface font-medium truncate group-hover:text-primary transition-colors">
                       {file.name}
                     </span>
-                    {file.tags[0] && (
-                      <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-surface-container text-secondary shrink-0">
-                        {file.tags[0].label}
-                      </span>
-                    )}
+                    <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-surface-container text-secondary shrink-0">
+                      {file.extension ? `.${file.extension.toUpperCase()}` : file.type}
+                    </span>
                   </div>
                   <div className="font-mono text-xs text-outline mt-0.5">
-                    {file.path} · {file.size} · Updated {file.modified}
+                    {file.size} · Updated {file.modified}
                   </div>
                 </div>
               </div>

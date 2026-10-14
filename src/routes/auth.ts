@@ -7,6 +7,7 @@ import { SESSION_COOKIE, attachUser } from '../plugins/auth.ts';
 import { loadConfig } from '../config/env.ts';
 import { errors } from '../lib/errors.ts';
 import type { UserRow } from '../db/repo.ts';
+import { Activity } from '../services/activity.ts';
 
 function userPublic(u: UserRow): Record<string, unknown> {
   return { id: u.id, username: u.username, role: u.role };
@@ -30,6 +31,7 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
         ip: request.ip,
       });
       if (!result) throw errors.unauthorized('اسم المستخدم أو كلمة المرور غير صحيحة.');
+      Activity.record({ userId: result.user.id, action: 'login', targetType: 'session', targetId: result.sessionId, ip: request.ip });
       reply.setCookie(SESSION_COOKIE, result.sessionId, {
         httpOnly: true,
         sameSite: 'lax',
@@ -44,6 +46,15 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/auth/logout', async (request, reply) => {
     attachUser(request);
+    if (request.user) {
+      Activity.record({
+        userId: request.user.id,
+        action: 'logout',
+        targetType: 'session',
+        targetId: request.sessionId,
+        ip: request.ip,
+      });
+    }
     if (request.sessionId) logout(request.sessionId);
     reply.clearCookie(SESSION_COOKIE, { path: '/' });
     return { ok: true };

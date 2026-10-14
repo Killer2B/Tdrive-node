@@ -41,8 +41,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const filteredFiles = query.trim()
     ? files.filter(f => 
         f.name.toLowerCase().includes(query.toLowerCase()) ||
-        f.path.toLowerCase().includes(query.toLowerCase()) ||
-        f.tags.some(t => t.label.toLowerCase().includes(query.toLowerCase())) ||
+      f.type.toLowerCase().includes(query.toLowerCase()) ||
+      (f.extension ?? '').toLowerCase().includes(query.toLowerCase()) ||
         f.sha256.toLowerCase().includes(query.toLowerCase())
       )
     : files.slice(0, 5);
@@ -67,7 +67,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Omnisearch files, tags, metadata or vaults..."
+            placeholder="Search files by name, type, or checksum..."
             className="w-full bg-transparent text-on-surface font-sans text-sm focus:outline-none placeholder:text-outline"
           />
           <kbd className="font-mono text-xs px-2 py-0.5 bg-surface-container-highest text-on-surface-variant rounded">
@@ -92,7 +92,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                     <span className="material-symbols-outlined text-primary text-base">cloud_upload</span>
                     <span className="font-medium group-hover:text-primary transition-colors">Upload & Ingest New File</span>
                   </div>
-                  <span className="font-mono text-outline text-[11px]">Direct / CLI</span>
+                  <span className="font-mono text-outline text-[11px]">Upload file</span>
                 </button>
                 <button
                   onClick={() => { onOpenCreateShare(); onClose(); }}
@@ -102,7 +102,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                     <span className="material-symbols-outlined text-secondary-fixed text-base">add_moderator</span>
                     <span className="font-medium group-hover:text-secondary-fixed transition-colors">Create Secure Client Share</span>
                   </div>
-                  <span className="font-mono text-outline text-[11px]">Zero-Knowledge</span>
+                  <span className="font-mono text-outline text-[11px]">Share link</span>
                 </button>
               </div>
             </div>
@@ -142,7 +142,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                   <div className="flex items-center gap-2 font-mono text-[11px] text-outline shrink-0">
                     <span>{file.size}</span>
                     <span className="px-1.5 py-0.2 rounded bg-surface-container-high text-on-surface-variant">
-                      {file.securityTier}
+                      {file.extension ? `.${file.extension.toUpperCase()}` : file.type}
                     </span>
                   </div>
                 </button>

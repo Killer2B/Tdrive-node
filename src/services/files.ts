@@ -2,7 +2,8 @@
 import { stat, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { Files, FileChunks, type FileRow, type FileType, type FileSource } from '../db/repo.ts';
+import { Files, FileChunks, Settings, type FileRow, type FileType, type FileSource } from '../db/repo.ts';
+import { getDb } from '../db/db.ts';
 import { getStorage } from '../storage/index.ts';
 import { sha256OfFile } from '../lib/hash.ts';
 import { sanitizeFileName, splitExt } from '../lib/paths.ts';
@@ -13,6 +14,7 @@ import { probeMedia, generateThumbnail, ffmpegAvailable } from './ffmpeg.ts';
 import { newId } from '../lib/ids.ts';
 import { splitFileIntoChunks, createRangeStream, deleteCacheChunks } from './chunkstore.ts';
 import * as telegram from './telegram.ts';
+import { Activity } from './activity.ts';
 
 const TYPE_BY_EXT: Record<string, FileType> = {};
 const addTypes = (type: FileType, exts: string[]): void => {
@@ -246,6 +248,33 @@ export function storageUsage(userId: string): StorageUsage {
   return { usedBytes: Files.usedBytes(userId) };
 }
 
+export async function purgeExpiredTrash(userId: string): Promise<{ removed: number; freedBytes: number }> {
+  const stored = Settings.get(userId, 'workspace');
+  const settings = stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : {};
+  const configuredDays = settings.retentionDays;
+  const days =
+    typeof configuredDays === 'number' && Number.isInteger(configuredDays) && configuredDays >= 1 && configuredDays <= 3650
+      ? configuredDays
+      : 30;
+  const expired = getDb()
+    .prepare('SELECT * FROM files WHERE user_id = ? AND trashed = 1 AND trashed_at <= ? ORDER BY trashed_at ASC')
+    .all(userId, Date.now() - days * 86_400_000) as FileRow[];
+  let freedBytes = 0;
+  for (const file of expired) {
+    await deleteFilePermanent(file);
+    freedBytes += file.size;
+  }
+  if (expired.length) {
+    Activity.record({
+      userId,
+      action: 'trash_purged',
+      targetType: 'system',
+      meta: { removed: expired.length, freedBytes, retentionDays: days },
+    });
+  }
+  return { removed: expired.length, freedBytes };
+}
+
 /** يحوّل صفّ ملف إلى الشكل الذي تتوقّعه الواجهة. */
 export function toApiFile(f: FileRow): Record<string, unknown> {
   return {
@@ -268,6 +297,7 @@ export function toApiFile(f: FileRow): Record<string, unknown> {
     isStarred: !!f.starred,
     isPinned: !!f.pinned,
     isDeleted: !!f.trashed,
+    trashedAt: f.trashed_at,
     modified: f.updated_at,
     created: f.created_at,
   };
