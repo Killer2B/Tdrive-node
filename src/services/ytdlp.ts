@@ -16,6 +16,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { runCapture, commandExists, killTree } from '../lib/spawn.ts';
 import { loadConfig } from '../config/env.ts';
+import { getLogger } from '../lib/logger.ts';
 import { ffmpegAvailable, ffmpegBin, resetFfmpegCache } from './ffmpeg.ts';
 
 export interface YtQuality {
@@ -195,13 +196,35 @@ export function cookiesInfo(): { path: string; present: boolean; bytes: number; 
 }
 
 /** وسائط مشتركة: كوكيز YouTube + ثبات الشبكة + وسائط إضافية من الإعداد. */
-function commonArgs(): string[] {
+function commonArgs(withCookies = true): string[] {
   const cfg = loadConfig();
   const a: string[] = ['--no-warnings', '--socket-timeout', '20', '--retries', '10', '--fragment-retries', '10'];
   const cookies = cookiesFilePath();
-  if (usableFile(cookies)) a.push('--cookies', cookies);
+  if (withCookies && usableFile(cookies)) a.push('--cookies', cookies);
   a.push(...cfg.tools.extraArgs);
   return a;
+}
+
+/**
+ * بديل بلا كوكيز: عملاء YouTube الذين يعطون روابط تشغيل مقبولة من عناوين مراكز البيانات
+ * دون PO token. اختبرنا فعليًّا: `mweb` و`tv_simply` و`web_embedded` تعمل، بينما
+ * `android_vr`/`tv` وحدها تُرجع 403 عند تنزيل البيانات.
+ */
+const YOUTUBE_FALLBACK_ARGS = ['--extractor-args', 'youtube:player_client=mweb,tv_simply,web_embedded'];
+
+/** هل الرابط يوتيوب؟ (البديل خاصّ به) */
+function isYouTubeUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    return /(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
+/** أخطاء قد يعالجها تغيير عميل YouTube: 403، فحص البوت، صيغة غير متاحة، فشل فكّ التشفير. */
+function isAuthOrFormatFailure(message: string): boolean {
+  return /403|Forbidden|not a bot|تأكيد الحساب|Sign in|الصيغة المطلوبة|format|تشفير|nsig|403/i.test(message);
 }
 
 /** رسالة مفهومة لأخطاء الاستخراج (فارغة إن لم نعرف السبب). */
@@ -248,23 +271,34 @@ function extractJson(stdout: string): RawInfo | null {
 export async function probe(url: string, signal?: AbortSignal): Promise<YtProbe> {
   const cfg = loadConfig();
   const bin = await ensureBinary();
-  const args = ['-J', '--no-playlist', ...commonArgs(), ...(await optionalArgs(bin)), '--', url];
-
-  let res: Awaited<ReturnType<typeof runCapture>>;
-  try {
-    res = await runCapture(bin, args, { timeoutMs: cfg.tools.probeTimeoutMs, signal });
-  } catch (e) {
-    if (e instanceof YtdlpUnavailableError) throw e;
-    const msg = e instanceof Error ? e.message : String(e);
-    if (/مهلة/.test(msg)) {
-      throw new Error('انتهت مهلة قراءة الرابط — قد يكون الموقع بطيئًا أو الرابط بثًّا مباشرًا.');
-    }
-    throw new Error(`تعذّر تشغيل yt-dlp: ${msg}`);
+  const opt = await optionalArgs(bin);
+  const base = ['-J', '--no-playlist'];
+  const attempts: string[][] = [[...base, ...commonArgs(true), ...opt, '--', url]];
+  if (isYouTubeUrl(url)) {
+    // محاولة ثانية بلا كوكيز وبعميل مختلف — تحلّ 403/فحص البوت على خوادم البيانات
+    attempts.push([...base, ...commonArgs(false), ...opt, ...YOUTUBE_FALLBACK_ARGS, '--', url]);
   }
 
-  if (res.code !== 0) {
-    const friendly = friendlyProbeError(res.stderr, cookiesInfo().present);
-    const detail = res.stderr.trim().slice(0, 400) || `رمز الخروج ${res.code}`;
+  let res: Awaited<ReturnType<typeof runCapture>> | null = null;
+  for (const args of attempts) {
+    try {
+      res = await runCapture(bin, args, { timeoutMs: cfg.tools.probeTimeoutMs, signal });
+    } catch (e) {
+      if (e instanceof YtdlpUnavailableError) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/مهلة/.test(msg)) {
+        throw new Error('انتهت مهلة قراءة الرابط — قد يكون الموقع بطيئًا أو الرابط بثًّا مباشرًا.');
+      }
+      throw new Error(`تعذّر تشغيل yt-dlp: ${msg}`);
+    }
+    if (res.code === 0) break;
+    if (!isYouTubeUrl(url) || !isAuthOrFormatFailure(res.stderr)) break;
+  }
+
+  if (!res || res.code !== 0) {
+    const stderr = res?.stderr ?? '';
+    const friendly = friendlyProbeError(stderr, cookiesInfo().present);
+    const detail = stderr.trim().slice(0, 400) || `رمز الخروج ${res?.code ?? 'غير معروف'}`;
     throw new Error(friendly || `yt-dlp فشل في قراءة الرابط: ${detail}`);
   }
 
@@ -408,39 +442,44 @@ export async function download(
   const hasFfmpeg = await ffmpegAvailable();
   const fmt = formatExpr(hasFfmpeg, opts.formatId);
   const flags = await capabilityFlags(bin);
+  const opt = await optionalArgs(bin);
   const outDir = path.resolve(opts.outDir);
-  const outTemplate = path.join(outDir, '%(id)s.%(ext)s');
 
-  const args = [
-    '--no-playlist',
-    // حزام أمان: رابط قائمة صريح لا يجب أن ينزّل أكثر من عنصر واحد
-    '--playlist-items',
-    '1',
-    '--newline',
-    // --print يجعل yt-dlp صامتًا؛ --progress يُعيد شريط التقدّم رغم ذلك
-    '--progress',
-    '--no-warnings',
-    '--no-mtime',
-    '--restrict-filenames',
-    '--concurrent-fragments',
-    '4',
-    '-f',
-    fmt,
-    '-o',
-    outTemplate,
-    '--progress-template',
-    'PROGRESS:%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s',
-  ];
-  if (flags.has('--print')) args.push('--print', 'after_move:FILEPATH:%(filepath)s');
-  if (flags.has('--no-simulate')) args.push('--no-simulate');
-  // ffmpeg المهيّأ في ./bin ليس في PATH، وyt-dlp لا يعرف مكانه إلا بهذا العلم.
-  const ffmpegPath = ffmpegBin();
-  if (path.isAbsolute(ffmpegPath) || ffmpegPath.includes('/') || ffmpegPath.includes('\\')) {
-    args.push('--ffmpeg-location', ffmpegPath);
-  }
-  args.push(...commonArgs(), ...(await optionalArgs(bin)), '--', url);
+  /** يبني وسائط المحاولة: الكوكيز (أو بلا) + وسائط بديلة لعملاء YouTube. */
+  const buildArgs = (withCookies: boolean, extra: string[]): string[] => {
+    const outTemplate = path.join(outDir, '%(id)s.%(ext)s');
+    const args = [
+      '--no-playlist',
+      // حزام أمان: رابط قائمة صريح لا يجب أن ينزّل أكثر من عنصر واحد
+      '--playlist-items',
+      '1',
+      '--newline',
+      // --print يجعل yt-dlp صامتًا؛ --progress يُعيد شريط التقدّم رغم ذلك
+      '--progress',
+      '--no-warnings',
+      '--no-mtime',
+      '--restrict-filenames',
+      '--concurrent-fragments',
+      '4',
+      '-f',
+      fmt,
+      '-o',
+      outTemplate,
+      '--progress-template',
+      'PROGRESS:%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s',
+    ];
+    if (flags.has('--print')) args.push('--print', 'after_move:FILEPATH:%(filepath)s');
+    if (flags.has('--no-simulate')) args.push('--no-simulate');
+    // ffmpeg المهيّأ في ./bin ليس في PATH، وyt-dlp لا يعرف مكانه إلا بهذا العلم.
+    const ffmpegPath = ffmpegBin();
+    if (path.isAbsolute(ffmpegPath) || ffmpegPath.includes('/') || ffmpegPath.includes('\\')) {
+      args.push('--ffmpeg-location', ffmpegPath);
+    }
+    args.push(...commonArgs(withCookies), ...opt, ...extra, '--', url);
+    return args;
+  };
 
-  return new Promise<DownloadResult>((resolve, reject) => {
+  const runOnce = (args: string[]): Promise<DownloadResult> => new Promise<DownloadResult>((resolve, reject) => {
     let child: ChildProcess;
     try {
       child = spawn(bin, args, { shell: false, windowsHide: true });
@@ -588,6 +627,26 @@ export async function download(
       })();
     });
   });
+
+  try {
+    return await runOnce(buildArgs(true, []));
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    // YouTube من عناوين مراكز البيانات قد يرفض روابط التشغيل (403) أو يطلب تحقّقًا.
+    // نعيد بعميل آخر بلا كوكيز (المسار المفضّل عند غياب/انتهاء الكوكيز).
+    if (opts.signal?.aborted || !isYouTubeUrl(url) || !isAuthOrFormatFailure(message)) throw e;
+    getLogger().warn({ err: message }, 'فشل تحميل YouTube — إعادة المحاولة بعميل بديل بلا كوكيز');
+    const hadCookies = usableFile(cookiesFilePath());
+    try {
+      return await runOnce(buildArgs(false, YOUTUBE_FALLBACK_ARGS));
+    } catch (fallbackError) {
+      const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+      // إن كانت الكوكيز موجودة وأخطأ العميل البديل، نجرّبها معه (قد تكون لازمة للمحتوى المقيّد)
+      if (opts.signal?.aborted || !hadCookies || !isAuthOrFormatFailure(fallbackMessage)) throw fallbackError;
+      getLogger().warn({ err: fallbackMessage }, 'تعذّر البديل بلا كوكيز — إعادة المحاولة بالكوكيز');
+      return await runOnce(buildArgs(true, YOUTUBE_FALLBACK_ARGS));
+    }
+  }
 }
 
 export async function version(): Promise<string | null> {
