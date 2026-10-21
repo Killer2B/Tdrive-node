@@ -4,11 +4,11 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { Activity } from '../services/activity.ts';
-import { authenticateApiKey } from '../services/api-keys.ts';
+import { authenticateCredentials } from '../services/credentials.ts';
 import { completeUpload, initUpload, uploadPart, uploadStatus, abortUpload } from '../services/uploads.ts';
 import { deleteFilePermanent, restoreFile, storageUsage, trashFile } from '../services/files.ts';
 import { createFolderAtPath, folderPath, resolveFolderPath } from '../services/folders.ts';
-import { FileChunks, Files, Folders, Shares, Uploads, Users, type FileRow, type UserRow } from '../db/repo.ts';
+import { FileChunks, Files, Folders, Shares, Uploads, type FileRow, type UserRow } from '../db/repo.ts';
 import { tb, withTransaction } from '../db/pg.ts';
 import { errors, isAppError } from '../lib/errors.ts';
 import { normalizeVirtualPath } from '../lib/paths.ts';
@@ -39,13 +39,23 @@ function apiPath(input: string): string {
   }
 }
 
-function requestKey(request: FastifyRequest): string | undefined {
+function requestCredentials(request: FastifyRequest): { username?: string; secret: string } | null {
   const authorization = request.headers.authorization;
-  if (typeof authorization === 'string' && /^bearer\s+/i.test(authorization)) {
-    return authorization.replace(/^bearer\s+/i, '').trim();
+  if (typeof authorization === 'string') {
+    const bearer = /^Bearer\s+(.+)$/i.exec(authorization);
+    if (bearer) return { secret: bearer[1].trim() };
+    // دعم Basic أيضًا: عملاء كثر لا يعرفون Bearer/X-API-Key
+    const basic = /^Basic\s+([A-Za-z0-9+/=]+)$/i.exec(authorization);
+    if (basic) {
+      const decoded = Buffer.from(basic[1], 'base64').toString('utf8');
+      const separator = decoded.indexOf(':');
+      if (separator >= 0) {
+        return { username: decoded.slice(0, separator), secret: decoded.slice(separator + 1) };
+      }
+    }
   }
   const key = request.headers['x-api-key'];
-  return typeof key === 'string' ? key.trim() : undefined;
+  return typeof key === 'string' && key.trim() ? { secret: key.trim() } : null;
 }
 
 function requireApiUser(request: FastifyRequest): UserRow {
@@ -138,11 +148,9 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       ['/developers', '/developers.md', `${API_ROOT}/openapi.json`].includes(request.url.split('?')[0])
     ) return;
     if (request.method === 'OPTIONS') return;
-    const key = requestKey(request);
-    const auth = key ? await authenticateApiKey(key) : null;
-    if (!auth) throw errors.unauthorized('Provide a valid API key using Authorization: Bearer or X-API-Key.');
-    const user = await Users.findById(auth.userId);
-    if (!user) throw errors.unauthorized();
+    const creds = requestCredentials(request);
+    const user = creds ? await authenticateCredentials(creds.username, creds.secret) : null;
+    if (!user) throw errors.unauthorized('Provide a valid API key or account credentials (Basic) / Bearer / X-API-Key.');
     request.user = user;
   });
 

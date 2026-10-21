@@ -2,16 +2,18 @@
 
 Base URL: `https://<your-tdrive-host>/api/v1`
 
-The JSON API uses API keys; create and revoke them in **Account → Developer API keys**. A key is shown only once and is stored server-side as a SHA-256 hash.
+The JSON API uses API keys; create and revoke them in **Account → Developer API keys**. A key is shown only once and is stored server-side as a SHA-256 hash. Account username/password also works via HTTP Basic (useful for WebDAV-style clients), and a key may be supplied as the Basic password with any username.
 
 ```http
 Authorization: Bearer tdk_<64 lowercase hex characters>
 ```
 
-or:
-
 ```http
 X-API-Key: tdk_<64 lowercase hex characters>
+```
+
+```http
+Authorization: Basic base64(username:password)
 ```
 
 Every JSON success uses `{ "ok": true, "data": ... }`. Errors use `{ "ok": false, "error": { "code": "...", "message": "..." } }`. Content downloads are byte streams (not JSON) and include `ETag`, `Accept-Ranges`, and `Content-Range` where applicable. JSON responses are not cached and include `X-Request-Id`.
@@ -79,9 +81,20 @@ Create a share with `{ "permission": "view"|"download", "expiresInHours": 24, "m
 
 ## WebDAV
 
-WebDAV is mounted at `/dav/` and uses the same API keys. Use HTTP Basic authentication with any username and the API key as the password for clients that do not support bearer headers; `Authorization: Bearer` and `X-API-Key` are also accepted.
+WebDAV is mounted at `/dav/` and exposes the whole drive to any WebDAV client (Obsidian/Remotely Save, Finder, Windows Explorer, rclone, Office, …).
 
-Supported methods: `OPTIONS`, `PROPFIND` (Depth `0` or `1`), `MKCOL`, `GET`, `HEAD`, `PUT`, `DELETE`, `MOVE`, and `COPY`. Cross-origin `Destination` headers and moves/copies into the source directory itself are rejected. `DELETE` moves files to Tdrive trash. File replacement uses a newly ingested file before deleting the previous content.
+**Authentication.** Two equivalent options:
+
+```http
+Authorization: Basic base64(username:password)   # your Tdrive account
+Authorization: Basic base64(any:tdk_…)           # an API key as the password
+```
+
+`Authorization: Bearer` and `X-API-Key` are also accepted. Only HTTPS should be used in production.
+
+**Supported methods:** `OPTIONS`, `PROPFIND` (Depth `0`, `1`, `infinity`), `PROPPATCH`, `MKCOL`, `GET`, `HEAD`, `PUT` (including large files), `DELETE`, `MOVE`, `COPY`, `LOCK`, and `UNLOCK`. Responses include `ETag`, `Last-Modified`, `Content-Length`, `resourcetype`, `quota-used-bytes`, and `quota-available-bytes`. `If-Match` / `If-None-Match` are honored on `PUT` (`412` on mismatch); write locks return `423` unless the token is sent in `If`/`Lock-Token`. Cross-origin `Destination` headers and moves/copies into the source directory itself are rejected. `DELETE` moves files to Tdrive trash.
+
+Any file type syncs unchanged — notes, images, e-books, bookmarks exports, highlights, and large archives — with Unicode/Arabic names and nested folders. Point your sync client at `https://<host>/dav/` (or a subfolder such as `/dav/Notes`).
 
 ## Compatibility notes
 

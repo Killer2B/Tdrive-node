@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { parse } from '../lib/validate.ts';
 import { requireUser } from '../plugins/auth.ts';
 import { createApiKey, listApiKeys, revokeApiKey } from '../services/api-keys.ts';
+import { invalidateCredentialCache } from '../services/credentials.ts';
 
 export default async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/account/api-keys', async (request) => {
@@ -21,6 +22,8 @@ export default async function apiKeyRoutes(app: FastifyInstance): Promise<void> 
     const user = requireUser(request);
     const id = (request.params as { id: string }).id;
     await revokeApiKey(user.id, id);
+    // مفتاح مُلغى قد يكون مخزّنًا في كاش WebDAV/API ⇒ أبطله فورًا
+    invalidateCredentialCache();
     return { ok: true };
   });
 }

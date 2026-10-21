@@ -9,6 +9,7 @@ import { requireUser } from '../plugins/auth.ts';
 import { Settings, Users, Sessions } from '../db/repo.ts';
 import { loadConfig } from '../config/env.ts';
 import { hashPassword, verifyPassword } from '../services/auth.ts';
+import { invalidateCredentialCache } from '../services/credentials.ts';
 import { version as ytdlpVersion, update as ytdlpUpdate, cookiesFilePath, cookiesInfo, resolveYtdlp } from '../services/ytdlp.ts';
 import { ffmpegAvailable } from '../services/ffmpeg.ts';
 import { checkConnection as tgCheck } from '../services/telegram.ts';
@@ -66,6 +67,8 @@ export default async function miscRoutes(app: FastifyInstance): Promise<void> {
     await Users.updatePassword(user.id, await hashPassword(body.next));
     // أبطل كل الجلسات الأخرى لإجبار إعادة الدخول
     await Sessions.deleteAllForUser(user.id);
+    // كلمة المرور القديمة قد تكون مخزّنة في كاش WebDAV/API ⇒ أبطله فورًا
+    invalidateCredentialCache();
     await Activity.record({ userId: user.id, action: 'password_changed', targetType: 'account', ip: request.ip });
     return { ok: true };
   });
