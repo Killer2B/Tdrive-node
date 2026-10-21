@@ -18,9 +18,9 @@ import {
 } from '../services/files.ts';
 import { Activity } from '../services/activity.ts';
 
-function ownFile(request: FastifyRequest, id: string): FileRow {
+async function ownFile(request: FastifyRequest, id: string): Promise<FileRow> {
   const user = requireUser(request);
-  const file = Files.findById(id);
+  const file = await Files.findById(id);
   if (!file || file.user_id !== user.id) throw errors.notFound('الملف غير موجود.');
   return file;
 }
@@ -46,24 +46,24 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
     const user = requireUser(request);
     const q = parse(listQuery, request.query);
     let rows: FileRow[];
-    if (q.q) rows = Files.search(user.id, q.q);
-    else if (q.view === 'recent') rows = Files.recent(user.id);
-    else if (q.view === 'starred') rows = Files.starred(user.id);
-    else if (q.view === 'trash' || q.trashed) rows = Files.trashList(user.id);
+    if (q.q) rows = await Files.search(user.id, q.q);
+    else if (q.view === 'recent') rows = await Files.recent(user.id);
+    else if (q.view === 'starred') rows = await Files.starred(user.id);
+    else if (q.view === 'trash' || q.trashed) rows = await Files.trashList(user.id);
     else {
       const folderId = q.folderId === undefined ? undefined : q.folderId === 'root' || q.folderId === '' ? null : q.folderId;
-      rows = Files.list(user.id, { folderId, sort: q.sort, order: q.order });
+      rows = await Files.list(user.id, { folderId, sort: q.sort, order: q.order });
     }
-    return { files: rows.map(toApiFile), usage: storageUsage(user.id) };
+    return { files: rows.map(toApiFile), usage: await storageUsage(user.id) };
   });
 
   app.get('/api/files/:id', async (request) => {
-    const file = ownFile(request, (request.params as { id: string }).id);
+    const file = await ownFile(request, (request.params as { id: string }).id);
     return { file: toApiFile(file) };
   });
 
   app.patch('/api/files/:id', async (request) => {
-    const file = ownFile(request, (request.params as { id: string }).id);
+    const file = await ownFile(request, (request.params as { id: string }).id);
     const body = parse(patchBody, request.body);
     const user = requireUser(request);
     const patch: Partial<FileRow> = {};
@@ -71,18 +71,18 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
     if (body.pinned !== undefined) patch.pinned = body.pinned ? 1 : 0;
     if (body.folderId !== undefined) {
       if (body.folderId !== null) {
-        const folder = Folders.findById(body.folderId);
+        const folder = await Folders.findById(body.folderId);
         if (!folder || folder.user_id !== user.id) throw errors.badRequest('المجلّد الوجهة غير موجود.');
       }
       patch.folder_id = body.folderId;
     }
     if (body.name !== undefined) {
       const targetFolder = body.folderId !== undefined ? body.folderId : file.folder_id;
-      patch.name = uniqueName(user.id, targetFolder, body.name);
+      patch.name = await uniqueName(user.id, targetFolder, body.name);
     }
-    Files.update(file.id, patch);
+    await Files.update(file.id, patch);
     if (body.starred !== undefined || body.pinned !== undefined || body.name !== undefined || body.folderId !== undefined) {
-      Activity.record({
+      await Activity.record({
         userId: user.id,
         action: 'file_updated',
         targetType: 'file',
@@ -92,13 +92,13 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
         meta: { starred: body.starred, pinned: body.pinned },
       });
     }
-    return { file: toApiFile(Files.findById(file.id)!) };
+    return { file: toApiFile((await Files.findById(file.id))!) };
   });
 
   app.post('/api/files/:id/trash', async (request) => {
-    const file = ownFile(request, (request.params as { id: string }).id);
-    trashFile(file);
-    Activity.record({
+    const file = await ownFile(request, (request.params as { id: string }).id);
+    await trashFile(file);
+    await Activity.record({
       userId: requireUser(request).id,
       action: 'file_trashed',
       targetType: 'file',
@@ -110,9 +110,9 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post('/api/files/:id/restore', async (request) => {
-    const file = ownFile(request, (request.params as { id: string }).id);
-    restoreFile(file);
-    Activity.record({
+    const file = await ownFile(request, (request.params as { id: string }).id);
+    await restoreFile(file);
+    await Activity.record({
       userId: requireUser(request).id,
       action: 'file_restored',
       targetType: 'file',
@@ -124,9 +124,9 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.delete('/api/files/:id', async (request) => {
-    const file = ownFile(request, (request.params as { id: string }).id);
+    const file = await ownFile(request, (request.params as { id: string }).id);
     await deleteFilePermanent(file);
-    Activity.record({
+    await Activity.record({
       userId: requireUser(request).id,
       action: 'file_deleted',
       targetType: 'file',
@@ -140,9 +140,9 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/files/trash/empty', async (request) => {
     const user = requireUser(request);
-    const items = Files.trashList(user.id);
+    const items = await Files.trashList(user.id);
     for (const f of items) await deleteFilePermanent(f);
-    Activity.record({
+    await Activity.record({
       userId: user.id,
       action: 'trash_emptied',
       targetType: 'system',
@@ -154,18 +154,18 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/api/files/trash/purge-expired', async (request) => {
     const user = requireUser(request);
-    return purgeExpiredTrash(user.id);
+    return await purgeExpiredTrash(user.id);
   });
 
   app.get('/api/files/:id/stream', async (request, reply) => {
-    const file = ownFile(request, (request.params as { id: string }).id);
-    return serveFileRange(request, reply, file, { attachment: false });
+    const file = await ownFile(request, (request.params as { id: string }).id);
+    return await serveFileRange(request, reply, file, { attachment: false });
   });
 
   app.get('/api/files/:id/download', async (request, reply) => {
-    const file = ownFile(request, (request.params as { id: string }).id);
+    const file = await ownFile(request, (request.params as { id: string }).id);
     if (!request.headers.range) {
-      Activity.record({
+      await Activity.record({
         userId: requireUser(request).id,
         action: 'download',
         targetType: 'file',
@@ -175,11 +175,11 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
         meta: { sizeBytes: file.size },
       });
     }
-    return serveFileRange(request, reply, file, { attachment: true });
+    return await serveFileRange(request, reply, file, { attachment: true });
   });
 
   app.get('/api/files/:id/thumbnail', async (request, reply) => {
-    const file = ownFile(request, (request.params as { id: string }).id);
+    const file = await ownFile(request, (request.params as { id: string }).id);
     const stream = await openThumbnail(file);
     if (!stream) return reply.code(404).send();
     return reply
@@ -190,6 +190,6 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
 
   app.get('/api/storage', async (request) => {
     const user = requireUser(request);
-    return storageUsage(user.id);
+    return await storageUsage(user.id);
   });
 }

@@ -5,6 +5,7 @@ import helmet from '@fastify/helmet';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import multipart from '@fastify/multipart';
+import { createHash } from 'node:crypto';
 import { loadConfig } from '../config/env.ts';
 
 export async function registerSecurity(app: FastifyInstance): Promise<void> {
@@ -40,6 +41,27 @@ export async function registerSecurity(app: FastifyInstance): Promise<void> {
     global: true,
     max: cfg.security.rateLimitMax,
     timeWindow: cfg.security.rateLimitWindow,
+    keyGenerator: (request) => {
+      const isDav = request.url === '/dav' || request.url.startsWith('/dav/');
+      if (!request.url.startsWith('/api/v1') && !isDav) return request.ip;
+      const authorization = request.headers.authorization;
+      let key: string | undefined;
+      if (typeof authorization === 'string') {
+        const bearer = authorization.match(/^Bearer\s+(.+)$/i);
+        const basic = isDav && authorization.match(/^Basic\s+([A-Za-z0-9+/=]+)$/i);
+        if (bearer) key = bearer[1].trim();
+        else if (basic) {
+          const decoded = Buffer.from(basic[1], 'base64').toString('utf8');
+          const separator = decoded.indexOf(':');
+          if (separator >= 0) key = decoded.slice(separator + 1).trim();
+        }
+      }
+      const headerKey = request.headers['x-api-key'];
+      if (!key && typeof headerKey === 'string') key = headerKey.trim();
+      if (!key) return request.ip;
+      const digest = createHash('sha256').update(key, 'utf8').digest('hex');
+      return `api-key:${digest}`;
+    },
     allowList: (req) => req.url === '/health' || req.url.startsWith('/api/events'),
   });
 

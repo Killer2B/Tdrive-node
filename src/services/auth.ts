@@ -10,7 +10,7 @@ export { hashPassword, verifyPassword };
 export async function ensureOwner(): Promise<void> {
   const cfg = loadConfig();
   const log = getLogger();
-  if (Users.count() > 0) return;
+  if ((await Users.count()) > 0) return;
   if (!cfg.owner.password) {
     log.warn(
       'لا يوجد مستخدمون ولم تُضبط OWNER_PASSWORD. اضبطها في .env ثم أعد التشغيل، أو استخدم: npm run owner:set -- <user> <pass>',
@@ -18,18 +18,18 @@ export async function ensureOwner(): Promise<void> {
     return;
   }
   const password_hash = await hashPassword(cfg.owner.password);
-  Users.create({ username: cfg.owner.username, password_hash, role: 'owner' });
+  await Users.create({ username: cfg.owner.username, password_hash, role: 'owner' });
   log.info({ username: cfg.owner.username }, 'أُنشئ حساب المالك. غيّر كلمة المرور واحذف OWNER_PASSWORD من البيئة.');
 }
 
 /** إنشاء/تحديث مالك من سطر الأوامر. */
 export async function setOwner(username: string, password: string): Promise<void> {
-  const existing = Users.findByUsername(username);
+  const existing = await Users.findByUsername(username);
   const password_hash = await hashPassword(password);
   if (existing) {
-    Users.updatePassword(existing.id, password_hash);
+    await Users.updatePassword(existing.id, password_hash);
   } else {
-    Users.create({ username, password_hash, role: 'owner' });
+    await Users.create({ username, password_hash, role: 'owner' });
   }
 }
 
@@ -44,7 +44,7 @@ export async function login(
   password: string,
   meta: { userAgent?: string; ip?: string },
 ): Promise<LoginResult | null> {
-  const user = Users.findByUsername(username);
+  const user = await Users.findByUsername(username);
   if (!user) {
     // ساوِ زمن الاستجابة بتكلفة تجزئة مكافئة لتقليل تسريب تعداد المستخدمين
     await hashPassword(password);
@@ -53,7 +53,7 @@ export async function login(
   const ok = await verifyPassword(user.password_hash, password);
   if (!ok) return null;
   const cfg = loadConfig();
-  const session = Sessions.create({
+  const session = await Sessions.create({
     user_id: user.id,
     ttlMs: cfg.session.ttlMs,
     user_agent: meta.userAgent,
@@ -62,18 +62,18 @@ export async function login(
   return { user, sessionId: session.id, expiresAt: session.expires_at };
 }
 
-export function logout(sessionId: string): void {
-  Sessions.delete(sessionId);
+export async function logout(sessionId: string): Promise<void> {
+  await Sessions.delete(sessionId);
 }
 
 /** يعيد المستخدم من جلسة صالحة أو null (ويحذف الجلسة المنتهية). */
-export function getUserFromSession(sessionId: string): UserRow | null {
-  const session = Sessions.find(sessionId);
+export async function getUserFromSession(sessionId: string): Promise<UserRow | null> {
+  const session = await Sessions.find(sessionId);
   if (!session) return null;
   if (session.expires_at < Date.now()) {
-    Sessions.delete(sessionId);
+    await Sessions.delete(sessionId);
     return null;
   }
-  const user = Users.findById(session.user_id);
+  const user = await Users.findById(session.user_id);
   return user ?? null;
 }

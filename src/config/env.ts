@@ -36,6 +36,18 @@ const boolish = z
   .union([z.boolean(), z.string()])
   .transform((v) => (typeof v === 'boolean' ? v : ['1', 'true', 'yes', 'on'].includes(v.toLowerCase())));
 
+/** يقسّم وسائط نصّية مع احترام الاقتباس: `--extractor-args "youtube:player_client=default"`. */
+function splitArgs(input: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(input)) !== null) {
+    const token = m[1] ?? m[2] ?? m[3];
+    if (token) out.push(token);
+  }
+  return out;
+}
+
 const envSchema = z.object({
   NODE_ENV: z.string().default('development'),
   HOST: z.string().default('0.0.0.0'),
@@ -51,7 +63,15 @@ const envSchema = z.object({
   STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
   LOCAL_STORAGE_DIR: z.string().default('./data/storage'),
   TMP_DIR: z.string().default('./data/tmp'),
-  DB_PATH: z.string().default('./data/tdrive.sqlite'),
+
+  // قاعدة البيانات: Supabase/Postgres فقط (لا تخزين محلّي).
+  // الصيغة: postgresql://postgres.<ref>:<password>@<host>:5432/postgres
+  SUPABASE_DB_URL: z.string().optional(),
+  DATABASE_URL: z.string().optional(),
+  DB_SCHEMA: z.string().default('tdrive'),
+  DB_SSL: boolish.default(true),
+  DB_POOL_MAX: z.coerce.number().int().positive().max(100).default(10),
+  DB_CONNECT_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 
   S3_ENDPOINT: z.string().optional(),
   S3_REGION: z.string().default('auto'),
@@ -86,6 +106,10 @@ const envSchema = z.object({
   YTDLP_COOKIES: z.string().optional(),
   // وسائط إضافية لـ yt-dlp مفصولة بمسافات (مثل: --extractor-args youtube:player_client=default)
   YTDLP_EXTRA_ARGS: z.string().default(''),
+  // مهلة قراءة بيانات الرابط (ms) — يوتيوب البطيء يحتاج أكثر من 15 ثانية أحيانًا
+  YTDLP_PROBE_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  // إن لم يُرسل yt-dlp أي تقدّم خلال هذه المدّة يُنهى التحميل العالق (ms)
+  YTDLP_STALL_TIMEOUT_MS: z.coerce.number().int().min(30_000).default(300_000),
 
   BACKUP_ENABLED: boolish.default(false),
   BACKUP_INTERVAL_HOURS: z.coerce.number().positive().default(18),
@@ -113,7 +137,6 @@ export interface Config {
     driver: 'local' | 's3';
     localDir: string;
     tmpDir: string;
-    dbPath: string;
     s3: {
       endpoint?: string;
       region: string;
@@ -122,6 +145,13 @@ export interface Config {
       secretAccessKey?: string;
       forcePathStyle: boolean;
     };
+  };
+  db: {
+    url: string;
+    schema: string;
+    ssl: boolean;
+    poolMax: number;
+    connectTimeoutMs: number;
   };
   content: { backend: 'telegram' | 'local' };
   telegram: { token?: string; chatId?: string; minGapMs: number; apiBase: string };
@@ -133,7 +163,16 @@ export interface Config {
     httpConnectTimeoutMs: number;
     httpIdleTimeoutMs: number;
   };
-  tools: { ytdlpPath: string; ffmpegPath: string; ffprobePath: string; thumbnailsEnabled: boolean; cookies?: string; extraArgs: string[] };
+  tools: {
+    ytdlpPath: string;
+    ffmpegPath: string;
+    ffprobePath: string;
+    thumbnailsEnabled: boolean;
+    cookies?: string;
+    extraArgs: string[];
+    probeTimeoutMs: number;
+    stallTimeoutMs: number;
+  };
   backup: {
     enabled: boolean;
     intervalHours: number;
@@ -176,6 +215,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     if (!e.TG_BOT_TOKEN) throw new Error('CONTENT_BACKEND=telegram لكن TG_BOT_TOKEN غير مضبوط');
     if (!e.TG_CHAT_ID) throw new Error('CONTENT_BACKEND=telegram لكن TG_CHAT_ID غير مضبوط');
   }
+  const dbUrl = e.SUPABASE_DB_URL ?? e.DATABASE_URL;
+  if (!dbUrl) {
+    throw new Error(
+      'SUPABASE_DB_URL غير مضبوط: التطبيق يعمل على Supabase/Postgres فقط. ' +
+        'انسخ سلسلة الاتصال (Session pooler) من لوحة Supabase إلى .env',
+    );
+  }
 
   cached = {
     nodeEnv: e.NODE_ENV,
@@ -190,7 +236,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       driver: e.STORAGE_DRIVER,
       localDir: e.LOCAL_STORAGE_DIR,
       tmpDir: e.TMP_DIR,
-      dbPath: e.DB_PATH,
       s3: {
         endpoint: e.S3_ENDPOINT,
         region: e.S3_REGION,
@@ -199,6 +244,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         secretAccessKey: e.S3_SECRET_ACCESS_KEY,
         forcePathStyle: e.S3_FORCE_PATH_STYLE,
       },
+    },
+    db: {
+      url: dbUrl,
+      schema: e.DB_SCHEMA,
+      ssl: e.DB_SSL,
+      poolMax: e.DB_POOL_MAX,
+      connectTimeoutMs: e.DB_CONNECT_TIMEOUT_MS,
     },
     content: { backend: e.CONTENT_BACKEND },
     telegram: {
@@ -225,7 +277,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       ffprobePath: e.FFPROBE_PATH,
       thumbnailsEnabled: e.THUMBNAILS_ENABLED,
       cookies: e.YTDLP_COOKIES,
-      extraArgs: e.YTDLP_EXTRA_ARGS.split(/\s+/).filter(Boolean),
+      extraArgs: splitArgs(e.YTDLP_EXTRA_ARGS),
+      probeTimeoutMs: e.YTDLP_PROBE_TIMEOUT_MS,
+      stallTimeoutMs: e.YTDLP_STALL_TIMEOUT_MS,
     },
     backup: {
       enabled: e.BACKUP_ENABLED,

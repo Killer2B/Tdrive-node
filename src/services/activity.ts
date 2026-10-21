@@ -1,4 +1,4 @@
-import { getDb } from '../db/db.ts';
+import { Activity as ActivityRepo } from '../db/repo.ts';
 import { newId } from '../lib/ids.ts';
 
 export interface ActivityInput {
@@ -23,48 +23,32 @@ export interface ActivityRow {
 }
 
 export const Activity = {
-  record(input: ActivityInput): void {
-    getDb()
-      .prepare(
-        `INSERT INTO activity_log
-          (id, user_id, action, target_type, target_id, target_name, ip, meta, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        newId('act'),
-        input.userId,
-        input.action,
-        input.targetType ?? null,
-        input.targetId ?? null,
-        input.targetName ?? null,
-        input.ip ?? null,
-        JSON.stringify(input.meta ?? {}),
-        Date.now(),
-      );
+  async record(input: ActivityInput): Promise<void> {
+    await ActivityRepo.insert({
+      id: newId('act'),
+      user_id: input.userId,
+      action: input.action,
+      target_type: input.targetType ?? null,
+      target_id: input.targetId ?? null,
+      target_name: input.targetName ?? null,
+      ip: input.ip ?? null,
+      meta: input.meta ?? {},
+    });
   },
 
-  list(userId: string, options: { fileId?: string; limit: number; offset: number }): ActivityRow[] {
-    const rows = options.fileId
-      ? getDb()
-          .prepare(
-            `SELECT id, action, target_type, target_id, target_name, ip, meta, created_at
-             FROM activity_log WHERE user_id = ? AND target_id = ?
-             ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-          )
-          .all(userId, options.fileId, options.limit, options.offset)
-      : getDb()
-          .prepare(
-            `SELECT id, action, target_type, target_id, target_name, ip, meta, created_at
-             FROM activity_log WHERE user_id = ?
-             ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-          )
-          .all(userId, options.limit, options.offset);
+  async list(userId: string, options: { fileId?: string; limit: number; offset: number }): Promise<ActivityRow[]> {
+    const rows = await ActivityRepo.list(userId, {
+      fileId: options.fileId,
+      limit: options.offset + options.limit,
+    });
 
-    return (rows as Array<Record<string, unknown>>).map((row) => {
+    return rows.slice(options.offset).map((row) => {
       let meta: Record<string, unknown> = {};
       if (typeof row.meta === 'string') {
         const parsed: unknown = JSON.parse(row.meta);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) meta = parsed as Record<string, unknown>;
+      } else if (row.meta && typeof row.meta === 'object' && !Array.isArray(row.meta)) {
+        meta = row.meta as Record<string, unknown>;
       }
       return {
         id: String(row.id),
@@ -79,14 +63,7 @@ export const Activity = {
     });
   },
 
-  count(userId: string, fileId?: string): number {
-    const row = fileId
-      ? (getDb()
-          .prepare('SELECT COUNT(*) AS count FROM activity_log WHERE user_id = ? AND target_id = ?')
-          .get(userId, fileId) as { count: number })
-      : (getDb().prepare('SELECT COUNT(*) AS count FROM activity_log WHERE user_id = ?').get(userId) as {
-          count: number;
-        });
-    return row.count;
+  async count(userId: string, fileId?: string): Promise<number> {
+    return ActivityRepo.count(userId, fileId ?? null);
   },
 };

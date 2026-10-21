@@ -30,3 +30,8 @@ tmp/
 # tool binaries fetched at runtime
 bin/yt-dlp
 bin/yt-dlp.exe
+bin/ffmpeg
+bin/ffmpeg.exe
+bin/ffprobe
+bin/ffprobe.exe
+bin/*.part

@@ -34,29 +34,30 @@ export interface InitResult {
   file?: Record<string, unknown>;
 }
 
-export function initUpload(input: {
+export async function initUpload(input: {
   userId: string;
   clientKey: string;
   folderId: string | null;
   name: string;
+  mime?: string;
   size: number;
   fingerprint?: string;
-}): InitResult {
+}): Promise<InitResult> {
   const cfg = loadConfig();
   if (!Number.isInteger(input.size) || input.size < 0) throw errors.badRequest('حجم الملف غير صالح.');
   if (cfg.upload.maxFileSize > 0 && input.size > cfg.upload.maxFileSize) {
     throw errors.payloadTooLarge('حجم الملف يتجاوز الحدّ الأقصى المسموح.');
   }
 
-  const existing = Uploads.findByClientKey(input.userId, input.clientKey);
+  const existing = await Uploads.findByClientKey(input.userId, input.clientKey);
   if (existing) {
     if (existing.status === 'completed' && existing.file_id) {
-      const file = Files.findById(existing.file_id);
+      const file = await Files.findById(existing.file_id);
       return {
         uploadId: existing.id,
         chunkSize: existing.chunk_size,
         totalChunks: existing.total_chunks,
-        received: toRanges(Uploads.receivedIndexes(existing.id)),
+        received: toRanges(await Uploads.receivedIndexes(existing.id)),
         completed: true,
         file: file ? toApiFile(file) : undefined,
       };
@@ -66,7 +67,7 @@ export function initUpload(input: {
         uploadId: existing.id,
         chunkSize: existing.chunk_size,
         totalChunks: existing.total_chunks,
-        received: toRanges(Uploads.receivedIndexes(existing.id)),
+        received: toRanges(await Uploads.receivedIndexes(existing.id)),
         completed: false,
       };
     }
@@ -74,11 +75,12 @@ export function initUpload(input: {
 
   const chunkSize = cfg.upload.chunkSize;
   const plan = planChunks(input.size, chunkSize);
-  const upload = Uploads.create({
+  const upload = await Uploads.create({
     user_id: input.userId,
     client_key: input.clientKey,
     folder_id: input.folderId,
     name: sanitizeFileName(input.name),
+    mime: input.mime ?? null,
     size: input.size,
     chunk_size: chunkSize,
     total_chunks: plan.totalChunks,
@@ -95,8 +97,8 @@ export function initUpload(input: {
   };
 }
 
-function requireOwnedPending(userId: string, uploadId: string): UploadRow {
-  const upload = Uploads.findById(uploadId);
+async function requireOwnedPending(userId: string, uploadId: string): Promise<UploadRow> {
+  const upload = await Uploads.findById(uploadId);
   if (!upload || upload.user_id !== userId) throw errors.notFound('جلسة الرفع غير موجودة.');
   if (upload.status === 'aborted') throw errors.conflict('جلسة الرفع أُلغيت.');
   return upload;
@@ -117,7 +119,7 @@ export async function uploadPart(input: {
   body: Readable;
   declaredSha?: string;
 }): Promise<PartResult> {
-  const upload = requireOwnedPending(input.userId, input.uploadId);
+  const upload = await requireOwnedPending(input.userId, input.uploadId);
   if (upload.status === 'completed') {
     return { idx: input.idx, received: upload.total_chunks, totalChunks: upload.total_chunks, duplicate: true };
   }
@@ -128,7 +130,7 @@ export async function uploadPart(input: {
   const expected = sizeOfChunk(plan, input.idx);
 
   // تكرار: نفس البصمة المعلنة لجزء مخزَّن مسبقًا ⇒ تخطٍّ بلا إعادة كتابة
-  const already = Uploads.getChunk(upload.id, input.idx);
+  const already = await Uploads.getChunk(upload.id, input.idx);
 
   await mkdir(partDir(upload.id), { recursive: true });
   const dest = partPath(upload.id, input.idx);
@@ -151,9 +153,9 @@ export async function uploadPart(input: {
     throw errors.conflict(`تعارض الجزء ${input.idx}: محتوى مختلف لنفس الفهرس.`);
   }
 
-  Uploads.addChunk(upload.id, input.idx, hasher.bytes, sha);
-  Uploads.touch(upload.id);
-  const received = Uploads.receivedIndexes(upload.id).length;
+  await Uploads.addChunk(upload.id, input.idx, hasher.bytes, sha);
+  await Uploads.touch(upload.id);
+  const received = (await Uploads.receivedIndexes(upload.id)).length;
   return { idx: input.idx, received, totalChunks: plan.totalChunks, duplicate: !!already };
 }
 
@@ -165,9 +167,9 @@ export interface StatusResult {
   status: UploadRow['status'];
 }
 
-export function uploadStatus(userId: string, uploadId: string): StatusResult {
-  const upload = requireOwnedPending(userId, uploadId);
-  const indexes = Uploads.receivedIndexes(upload.id);
+export async function uploadStatus(userId: string, uploadId: string): Promise<StatusResult> {
+  const upload = await requireOwnedPending(userId, uploadId);
+  const indexes = await Uploads.receivedIndexes(upload.id);
   return {
     uploadId: upload.id,
     totalChunks: upload.total_chunks,
@@ -184,13 +186,13 @@ export async function completeUpload(input: {
 }): Promise<{ file: Record<string, unknown>; fileRow: FileRow }> {
   const cfg = loadConfig();
   const log = getLogger();
-  const upload = requireOwnedPending(input.userId, input.uploadId);
+  const upload = await requireOwnedPending(input.userId, input.uploadId);
   if (upload.status === 'completed' && upload.file_id) {
-    const existing = Files.findById(upload.file_id);
+    const existing = await Files.findById(upload.file_id);
     if (existing) return { file: toApiFile(existing), fileRow: existing };
   }
 
-  const chunks = Uploads.chunkHashesOrdered(upload.id);
+  const chunks = await Uploads.chunkHashesOrdered(upload.id);
   if (chunks.length !== upload.total_chunks) {
     throw errors.badRequest(
       `الأجزاء غير مكتملة (${chunks.length}/${upload.total_chunks}). استأنف إرسال الأجزاء الناقصة.`,
@@ -212,14 +214,14 @@ export async function completeUpload(input: {
   }
 
   const chunkSize = upload.chunk_size;
-  const name = uniqueName(upload.user_id, upload.folder_id, upload.name);
+  const name = await uniqueName(upload.user_id, upload.folder_id, upload.name);
   const type = classifyType(name);
-  const mime = mimeForName(name);
+  const mime = mimeForName(name, upload.mime);
   const fileId = newId('fil');
   const telegramBackend = cfg.content.backend === 'telegram';
   const sha = upload.fingerprint ?? fingerprintFromChunkHashes(chunks.map((c) => c.sha256));
 
-  const fileRow: FileRow = Files.create({
+  const fileRow: FileRow = await Files.create({
     id: fileId,
     user_id: upload.user_id,
     folder_id: upload.folder_id,
@@ -239,30 +241,30 @@ export async function completeUpload(input: {
   // انقل ملفّات الأجزاء إلى قطع الكاش + سجّل file_chunks
   for (const c of chunks) {
     await cacheChunkFromPath(fileId, c.idx, partPath(upload.id, c.idx));
-    FileChunks.add({ file_id: fileId, idx: c.idx, size: c.size, sha256: c.sha256, cached: true });
+    await FileChunks.add({ file_id: fileId, idx: c.idx, size: c.size, sha256: c.sha256, cached: true });
   }
 
-  Uploads.setStatus(upload.id, 'completed', fileRow.id);
+  await Uploads.setStatus(upload.id, 'completed', fileRow.id);
   await rm(partDir(upload.id), { recursive: true, force: true }).catch(() => {});
-  if (telegramBackend) enqueueFlush(upload.user_id, fileId, name);
+  if (telegramBackend) await enqueueFlush(upload.user_id, fileId, name);
 
   log.info({ uploadId: upload.id, fileId, backend: cfg.content.backend }, 'اكتمل الرفع (مقطّع)');
   return { file: toApiFile(fileRow), fileRow };
 }
 
 export async function abortUpload(userId: string, uploadId: string): Promise<void> {
-  const upload = Uploads.findById(uploadId);
+  const upload = await Uploads.findById(uploadId);
   if (!upload || upload.user_id !== userId) return;
-  Uploads.setStatus(upload.id, 'aborted', null);
+  await Uploads.setStatus(upload.id, 'aborted', null);
   await rm(partDir(upload.id), { recursive: true, force: true }).catch(() => {});
 }
 
 /** تنظيف جلسات الرفع المنتهية المهجورة (يستدعيه المجدوِل). */
 export async function cleanupExpiredUploads(): Promise<number> {
-  const expired = Uploads.listExpiredPending();
+  const expired = await Uploads.listExpiredPending();
   for (const u of expired) {
     await rm(partDir(u.id), { recursive: true, force: true }).catch(() => {});
-    Uploads.delete(u.id);
+    await Uploads.delete(u.id);
   }
   return expired.length;
 }

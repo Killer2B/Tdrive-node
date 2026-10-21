@@ -39,6 +39,13 @@ export async function serveFileRange(
   }
   if (r.type === 'ok') {
     const { start, end } = r.range;
+    if (request.method === 'HEAD') {
+      return reply
+        .code(206)
+        .header('Content-Range', `bytes ${start}-${end}/${file.size}`)
+        .header('Content-Length', end - start + 1)
+        .send();
+    }
     const { stream } = await openFileRange(file, { start, end });
     return reply
       .code(206)
@@ -46,6 +53,7 @@ export async function serveFileRange(
       .header('Content-Length', end - start + 1)
       .send(stream);
   }
+  if (request.method === 'HEAD') return reply.header('Content-Length', file.size).send();
   const { stream } = await openFileRange(file);
   return reply.header('Content-Length', file.size).send(stream);
 }

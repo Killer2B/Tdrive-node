@@ -1,11 +1,11 @@
 /** مجدوِل داخليّ: تنظيف دوريّ + نسخ احتياطي كل BACKUP_INTERVAL_HOURS. */
 import { Kv, Sessions, Jobs } from '../db/repo.ts';
+import { query, tb } from '../db/pg.ts';
 import { loadConfig } from '../config/env.ts';
 import { getLogger } from '../lib/logger.ts';
 import { cleanupExpiredUploads } from './uploads.ts';
 import { runBackup } from './backup.ts';
 import { evictCache } from './chunkstore.ts';
-import { getDb } from '../db/db.ts';
 import { purgeExpiredTrash } from './files.ts';
 
 const TICK_MS = 5 * 60 * 1000; // كل 5 دقائق
@@ -15,8 +15,8 @@ const JOB_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 let timer: NodeJS.Timeout | null = null;
 let ticking = false;
 
-function lastRun(key: string): number {
-  const v = Kv.get(key);
+async function lastRun(key: string): Promise<number> {
+  const v = await Kv.get(key);
   return v ? Number(v) : 0;
 }
 
@@ -27,18 +27,18 @@ async function tick(): Promise<void> {
   const log = getLogger();
   const now = Date.now();
   try {
-    if (now - lastRun('last_cleanup') >= CLEANUP_INTERVAL_MS) {
-      const sessions = Sessions.deleteExpired();
+    if (now - (await lastRun('last_cleanup')) >= CLEANUP_INTERVAL_MS) {
+      const sessions = await Sessions.deleteExpired();
       const uploads = await cleanupExpiredUploads();
-      Jobs.reclaimStale();
-      const jobs = Jobs.deleteDoneBefore(now - JOB_RETENTION_MS);
-      const users = getDb().prepare('SELECT id FROM users').all() as Array<{ id: string }>;
+      await Jobs.reclaimStale();
+      const jobs = await Jobs.deleteDoneBefore(now - JOB_RETENTION_MS);
+      const users = await query<{ id: string }>(`SELECT id FROM ${tb('users')}`);
       let purgedTrash = 0;
       for (const user of users) {
         const result = await purgeExpiredTrash(user.id);
         purgedTrash += result.removed;
       }
-      Kv.set('last_cleanup', String(now));
+      await Kv.set('last_cleanup', String(now));
       log.debug({ sessions, uploads, jobs, purgedTrash }, 'تنظيف دوريّ');
     }
 
@@ -54,8 +54,8 @@ async function tick(): Promise<void> {
 
     if (cfg.backup.enabled) {
       const intervalMs = cfg.backup.intervalHours * 60 * 60 * 1000;
-      if (now - lastRun('last_backup') >= intervalMs) {
-        Kv.set('last_backup', String(now)); // سجّل قبل التشغيل لمنع التكرار عند التداخل
+      if (now - (await lastRun('last_backup')) >= intervalMs) {
+        await Kv.set('last_backup', String(now)); // سجّل قبل التشغيل لمنع التكرار عند التداخل
         try {
           await runBackup('scheduled');
         } catch (e) {

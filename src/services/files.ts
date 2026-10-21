@@ -3,7 +3,7 @@ import { stat, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { Files, FileChunks, Settings, type FileRow, type FileType, type FileSource } from '../db/repo.ts';
-import { getDb } from '../db/db.ts';
+import { query, tb } from '../db/pg.ts';
 import { getStorage } from '../storage/index.ts';
 import { sha256OfFile } from '../lib/hash.ts';
 import { sanitizeFileName, splitExt } from '../lib/paths.ts';
@@ -58,13 +58,13 @@ export function isInlineSafe(mime: string): boolean {
 }
 
 /** يولّد اسمًا فريدًا داخل المجلّد بإلحاق (1)/(2) عند التصادم (إصلاح L7). */
-export function uniqueName(userId: string, folderId: string | null, desired: string): string {
+export async function uniqueName(userId: string, folderId: string | null, desired: string): Promise<string> {
   const safe = sanitizeFileName(desired);
-  if (!Files.findByFolderAndName(userId, folderId, safe)) return safe;
+  if (!(await Files.findByFolderAndName(userId, folderId, safe))) return safe;
   const { stem, ext } = splitExt(safe);
   for (let i = 1; i < 10000; i++) {
     const candidate = `${stem} (${i})${ext}`;
-    if (!Files.findByFolderAndName(userId, folderId, candidate)) return candidate;
+    if (!(await Files.findByFolderAndName(userId, folderId, candidate))) return candidate;
   }
   return `${stem}-${newId()}${ext}`;
 }
@@ -100,7 +100,7 @@ export async function ingestLocalFile(params: IngestParams): Promise<FileRow> {
     throw errors.payloadTooLarge('حجم الملف يتجاوز الحدّ الأقصى المسموح.');
   }
 
-  const name = uniqueName(params.userId, params.folderId, params.name);
+  const name = await uniqueName(params.userId, params.folderId, params.name);
   const type = classifyType(name);
   const mime = mimeForName(name, params.mime);
   const fileId = newId('fil');
@@ -139,7 +139,7 @@ export async function ingestLocalFile(params: IngestParams): Promise<FileRow> {
     }
   }
 
-  const row = Files.create({
+  const row = await Files.create({
     id: fileId,
     user_id: params.userId,
     folder_id: params.folderId,
@@ -182,7 +182,7 @@ export async function openFileRange(
   range?: { start: number; end: number },
 ): Promise<OpenedStream> {
   const mime = file.mime ?? mimeForName(file.name);
-  const chunks = FileChunks.listByFile(file.id);
+  const chunks = await FileChunks.listByFile(file.id);
 
   if (chunks.length === 0) {
     // توافق مع ملفّات نمط الكائن الكامل القديم (إن وُجدت)
@@ -209,25 +209,25 @@ export async function openThumbnail(file: FileRow): Promise<Readable | null> {
   }
 }
 
-export function trashFile(file: FileRow): void {
-  Files.setTrashed(file.id, true);
+export async function trashFile(file: FileRow): Promise<void> {
+  await Files.setTrashed(file.id, true);
 }
 
-export function restoreFile(file: FileRow): void {
+export async function restoreFile(file: FileRow): Promise<void> {
   // تجنّب تصادم الاسم عند الاستعادة
-  const name = uniqueName(file.user_id, file.folder_id, file.name);
-  if (name !== file.name) Files.update(file.id, { name });
-  Files.setTrashed(file.id, false);
+  const name = await uniqueName(file.user_id, file.folder_id, file.name);
+  if (name !== file.name) await Files.update(file.id, { name });
+  await Files.setTrashed(file.id, false);
 }
 
 export async function deleteFilePermanent(file: FileRow): Promise<void> {
   const storage = getStorage();
-  const chunks = FileChunks.listByFile(file.id);
+  const chunks = await FileChunks.listByFile(file.id);
   await deleteCacheChunks(file.id, chunks);
   if (file.storage_key) await storage.delete(file.storage_key).catch(() => {});
   if (file.thumb_key) await storage.delete(file.thumb_key).catch(() => {});
-  FileChunks.deleteByFile(file.id);
-  Files.delete(file.id);
+  await FileChunks.deleteByFile(file.id);
+  await Files.delete(file.id);
 
   // حذف رسائل Telegram في الخلفية (أفضل جهد؛ لا يُعطّل الاستجابة)
   if (file.backend === 'telegram') {
@@ -244,28 +244,29 @@ export interface StorageUsage {
   usedBytes: number;
 }
 
-export function storageUsage(userId: string): StorageUsage {
-  return { usedBytes: Files.usedBytes(userId) };
+export async function storageUsage(userId: string): Promise<StorageUsage> {
+  return { usedBytes: await Files.usedBytes(userId) };
 }
 
 export async function purgeExpiredTrash(userId: string): Promise<{ removed: number; freedBytes: number }> {
-  const stored = Settings.get(userId, 'workspace');
+  const stored = await Settings.get(userId, 'workspace');
   const settings = stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : {};
   const configuredDays = settings.retentionDays;
   const days =
     typeof configuredDays === 'number' && Number.isInteger(configuredDays) && configuredDays >= 1 && configuredDays <= 3650
       ? configuredDays
       : 30;
-  const expired = getDb()
-    .prepare('SELECT * FROM files WHERE user_id = ? AND trashed = 1 AND trashed_at <= ? ORDER BY trashed_at ASC')
-    .all(userId, Date.now() - days * 86_400_000) as FileRow[];
+  const expired = await query<FileRow>(
+    `SELECT * FROM ${tb('files')} WHERE user_id = $1 AND trashed = 1 AND trashed_at <= $2 ORDER BY trashed_at ASC`,
+    [userId, Date.now() - days * 86_400_000],
+  );
   let freedBytes = 0;
   for (const file of expired) {
     await deleteFilePermanent(file);
     freedBytes += file.size;
   }
   if (expired.length) {
-    Activity.record({
+    await Activity.record({
       userId,
       action: 'trash_purged',
       targetType: 'system',

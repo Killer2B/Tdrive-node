@@ -1,15 +1,15 @@
-/** أمر CLI لتطبيق الهجرات يدويًّا: npm run db:migrate */
-import { getDb, closeDb } from './db.ts';
+/** أمر CLI للتحقّق من مخطّط Supabase: npm run db:migrate */
+import { closePool, getSchema, ping } from './pg.ts';
 import { runMigrations } from './migrate.ts';
 
 try {
-  const db = getDb();
-  const { applied } = runMigrations(db);
-  if (applied.length === 0) console.log('لا هجرات جديدة. القاعدة محدّثة.');
-  else console.log(`طُبّقت الهجرات: ${applied.join(', ')}`);
+  await ping();
+  const { applied } = await runMigrations();
+  if (applied.length === 0) console.log(`مخطّط Supabase "${getSchema()}" سليم ومُسجَّل.`);
+  else console.log(`سُجّلت: ${applied.join(', ')}`);
 } catch (e) {
-  console.error('فشل تطبيق الهجرات:', e);
+  console.error('فشل التحقّق من مخطّط Supabase:', e);
   process.exitCode = 1;
 } finally {
-  closeDb();
+  await closePool();
 }

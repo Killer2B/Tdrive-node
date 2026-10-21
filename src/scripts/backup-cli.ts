@@ -1,10 +1,11 @@
 /** أمر CLI لتشغيل نسخة احتياطية فورًا: npm run backup:now */
-import { getDb, closeDb } from '../db/db.ts';
+import { closePool, ping } from '../db/pg.ts';
 import { runMigrations } from '../db/migrate.ts';
 import { runBackup } from '../services/backup.ts';
 
 try {
-  runMigrations(getDb());
+  await ping();
+  await runMigrations();
   const summary = await runBackup('manual');
   if (summary.results.length === 0) console.log('لم تُنتَج أي نسخة (تحقّق من الإعدادات/السجلّ).');
   else {
@@ -14,5 +15,5 @@ try {
   console.error('فشل النسخ الاحتياطي:', e);
   process.exitCode = 1;
 } finally {
-  closeDb();
+  await closePool();
 }

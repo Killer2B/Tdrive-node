@@ -207,4 +207,33 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE shares ADD COLUMN ip_allow TEXT;
     `,
   },
+  {
+    id: '0004_api_keys',
+    up: /* sql */ `
+      CREATE TABLE api_keys (
+        id            TEXT PRIMARY KEY,
+        user_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        label         TEXT NOT NULL,
+        key_hash      TEXT NOT NULL UNIQUE,
+        key_prefix    TEXT NOT NULL,
+        created_at    INTEGER NOT NULL,
+        last_used_at  INTEGER,
+        revoked_at    INTEGER
+      );
+      CREATE INDEX idx_api_keys_user ON api_keys(user_id, created_at);
+      CREATE INDEX idx_api_keys_active ON api_keys(key_hash, revoked_at);
+    `,
+  },
+  {
+    id: '0005_share_permission',
+    up: /* sql */ `
+      ALTER TABLE shares ADD COLUMN permission TEXT NOT NULL DEFAULT 'download';
+    `,
+  },
+  {
+    id: '0006_upload_mime',
+    up: /* sql */ `
+      ALTER TABLE uploads ADD COLUMN mime TEXT;
+    `,
+  },
 ];

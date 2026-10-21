@@ -36,7 +36,7 @@ export async function splitFileIntoChunks(
     const rs = size === 0 ? Readable.from([Buffer.alloc(0)]) : createReadStream(tempPath, { start, end });
     rs.pipe(hpt);
     await storage.put(cacheKey(fileId, idx), hpt, { size: len });
-    FileChunks.add({ file_id: fileId, idx, size: len, sha256: hpt.digestHex(), cached: true });
+    await FileChunks.add({ file_id: fileId, idx, size: len, sha256: hpt.digestHex(), cached: true });
     if (totalChunks === 1 && size === 0) break;
   }
 }
@@ -59,7 +59,7 @@ export async function readChunkBuffer(file: FileRow, chunk: FileChunkRow, signal
     // write-through إلى الكاش (أفضل جهد)
     try {
       await storage.put(key, buf, { size: buf.length });
-      FileChunks.setCached(file.id, chunk.idx, true);
+      await FileChunks.setCached(file.id, chunk.idx, true);
     } catch {
       /* تجاهل فشل التخزين المؤقّت */
     }
@@ -99,7 +99,7 @@ export async function flushChunkToTelegram(file: FileRow, chunk: FileChunkRow, s
   const key = cacheKey(file.id, chunk.idx);
   const buf = await storage.get(key); // يجب أن تكون في الكاش قبل الرفع
   const ref = await telegram.sendChunk(buf, `${file.id}_${chunk.idx}.part`, signal);
-  FileChunks.setTg(file.id, chunk.idx, ref.messageId, ref.fileId);
+  await FileChunks.setTg(file.id, chunk.idx, ref.messageId, ref.fileId);
 }
 
 /** يحذف قطع ملف من الكاش (ومن Telegram في الخلفية عبر المستدعي). */
@@ -128,10 +128,10 @@ export async function evictCache(): Promise<{ evicted: number; freed: number }> 
     if (!m) continue;
     const fileId = m[1];
     const idx = Number(m[2]);
-    const chunk = FileChunks.get(fileId, idx);
+    const chunk = await FileChunks.get(fileId, idx);
     if (!chunk || !chunk.tg_file_id) continue; // لا تُخلِ قطعة لم تُرفَع بعد
     await storage.delete(it.key).catch(() => {});
-    FileChunks.setCached(fileId, idx, false);
+    await FileChunks.setCached(fileId, idx, false);
     total -= it.size;
     freed += it.size;
     evicted++;

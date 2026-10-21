@@ -15,6 +15,9 @@ import shareRoutes from './shares.ts';
 import sessionRoutes from './sessions.ts';
 import miscRoutes from './misc.ts';
 import analyticsRoutes from './analytics.ts';
+import apiKeyRoutes from './api-keys.ts';
+import apiV1Routes from './api-v1.ts';
+import webDavRoutes from './webdav.ts';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // صحّة عامّة
@@ -23,6 +26,8 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   // عامّة (المصادقة + روابط المشاركة العامّة بلا تسجيل دخول)
   await app.register(authRoutes);
   await app.register(publicRoutes);
+  await app.register(apiV1Routes);
+  await app.register(webDavRoutes);
 
   // محميّة
   await app.register(async (secured) => {
@@ -36,6 +41,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     await secured.register(sessionRoutes);
     await secured.register(miscRoutes);
     await secured.register(analyticsRoutes);
+    await secured.register(apiKeyRoutes);
   });
 
   // خدمة الواجهة المبنيّة (web/dist) إن وُجدت

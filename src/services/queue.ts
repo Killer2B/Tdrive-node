@@ -50,7 +50,7 @@ function formatEta(sec?: number): string | undefined {
 }
 
 /** يُنشئ مهمة تحميل جديدة ويُرجعها، مع بثّها للواجهة. */
-export function enqueueDownload(input: {
+export async function enqueueDownload(input: {
   userId: string;
   url: string;
   mode: 'direct' | 'media';
@@ -58,7 +58,7 @@ export function enqueueDownload(input: {
   folderId?: string | null;
   name?: string;
   title?: string;
-}): JobRow {
+}): Promise<JobRow> {
   const cfg = loadConfig();
   const payload: DownloadPayload = {
     url: input.url,
@@ -68,7 +68,7 @@ export function enqueueDownload(input: {
     name: input.name,
     title: input.title,
   };
-  const job = Jobs.create({
+  const job = await Jobs.create({
     user_id: input.userId,
     type: input.mode === 'media' ? JobType.Media : JobType.DirectUrl,
     payload,
@@ -80,9 +80,9 @@ export function enqueueDownload(input: {
 }
 
 /** مهمة رفع قطع ملف من الكاش إلى Telegram (التخزين الدائم). */
-export function enqueueFlush(userId: string, fileId: string, title: string): JobRow {
+export async function enqueueFlush(userId: string, fileId: string, title: string): Promise<JobRow> {
   const cfg = loadConfig();
-  const job = Jobs.create({
+  const job = await Jobs.create({
     user_id: userId,
     type: JobType.FlushTelegram,
     payload: { fileId },
@@ -93,23 +93,29 @@ export function enqueueFlush(userId: string, fileId: string, title: string): Job
   return job;
 }
 
-export function requestCancel(userId: string, jobId: string): boolean {
-  const job = Jobs.findById(jobId);
+export async function requestCancel(userId: string, jobId: string): Promise<boolean> {
+  const job = await Jobs.findById(jobId);
   if (!job || job.user_id !== userId) return false;
-  Jobs.requestCancel(jobId);
+  await Jobs.requestCancel(jobId);
   const ctrl = active.get(jobId);
   if (ctrl) ctrl.abort();
   return true;
 }
 
 /** يعيد مهمة فاشلة/ملغاة إلى الطابور. */
-export function retryJob(userId: string, jobId: string): boolean {
-  const job = Jobs.findById(jobId);
+export async function retryJob(userId: string, jobId: string): Promise<boolean> {
+  const job = await Jobs.findById(jobId);
   if (!job || job.user_id !== userId) return false;
   if (job.status === 'running' || job.status === 'queued') return false;
-  Jobs.requeue(jobId);
-  publishJob(Jobs.findById(jobId)!);
+  await Jobs.requeue(jobId);
+  await publishFresh(jobId);
   return true;
+}
+
+/** يجلب أحدث حالة للمهمة ويبثّها للواجهة. */
+async function publishFresh(jobId: string): Promise<void> {
+  const fresh = await Jobs.findById(jobId);
+  if (fresh) publishJob(fresh);
 }
 
 /** يحوّل صفّ مهمة إلى شكل الواجهة. */
@@ -148,24 +154,27 @@ async function runJob(job: JobRow): Promise<void> {
   active.set(job.id, controller);
 
   const renew = setInterval(() => {
-    if (Jobs.isCancelRequested(job.id)) controller.abort();
-    else Jobs.renewLease(job.id, LEASE_MS);
+    void (async () => {
+      if (await Jobs.isCancelRequested(job.id)) controller.abort();
+      else await Jobs.renewLease(job.id, LEASE_MS);
+    })().catch((e) => getLogger().error({ err: String(e) }, 'خطأ في تجديد إجارة المهمة'));
   }, RENEW_MS);
 
   let lastEmit = 0;
-  const emit = (patch: Parameters<typeof Jobs.progress>[1]): void => {
+  const emit = async (patch: Parameters<typeof Jobs.progress>[1]): Promise<void> => {
     const now = Date.now();
     if (now - lastEmit < PROGRESS_MIN_INTERVAL) return;
     lastEmit = now;
-    Jobs.progress(job.id, patch);
-    const fresh = Jobs.findById(job.id);
-    if (fresh) publishJob(fresh);
+    // لا نترك وعد التقدّم بلا معالجة: فشل الكتابة/البثّ لا يجب أن يُسقط العملية
+    await Jobs.progress(job.id, patch)
+      .then(() => publishFresh(job.id))
+      .catch((e) => getLogger().warn({ err: String(e), jobId: job.id }, 'تعذّر تحديث تقدّم المهمة'));
   };
 
   const workDir = path.join(cfg.storage.tmpDir, 'downloads', job.id);
 
   try {
-    if (Jobs.isCancelRequested(job.id)) throw new Error('CANCELED');
+    if (await Jobs.isCancelRequested(job.id)) throw new Error('CANCELED');
 
     if (job.type === JobType.FlushTelegram) {
       await runFlush(job, controller.signal, emit);
@@ -175,8 +184,8 @@ async function runJob(job: JobRow): Promise<void> {
     const payload = JSON.parse(job.payload) as DownloadPayload;
     await mkdir(workDir, { recursive: true });
 
-    Jobs.progress(job.id, { stage: 'يبدأ التحميل', progress: 0 });
-    publishJob(Jobs.findById(job.id)!);
+    await Jobs.progress(job.id, { stage: 'يبدأ التحميل', progress: 0 });
+    await publishFresh(job.id);
 
     let producedPath: string;
     let suggestedName: string | undefined = payload.name;
@@ -236,10 +245,10 @@ async function runJob(job: JobRow): Promise<void> {
       suggestedName = payload.name ?? (payload.title ? `${sanitizeFileName(payload.title)}${ext}` : base);
     }
 
-    if (Jobs.isCancelRequested(job.id)) throw new Error('CANCELED');
+    if (await Jobs.isCancelRequested(job.id)) throw new Error('CANCELED');
 
-    Jobs.progress(job.id, { stage: 'حفظ في التخزين', progress: 99 });
-    publishJob(Jobs.findById(job.id)!);
+    await Jobs.progress(job.id, { stage: 'حفظ في التخزين', progress: 99 });
+    await publishFresh(job.id);
 
     const file = await ingestLocalFile({
       userId: job.user_id,
@@ -251,30 +260,32 @@ async function runJob(job: JobRow): Promise<void> {
       mime,
     });
 
-    Jobs.complete(job.id, { fileId: file.id }, file.id);
-    publishJob(Jobs.findById(job.id)!);
-    if (file.backend === 'telegram') enqueueFlush(job.user_id, file.id, suggestedName ?? file.name);
+    await Jobs.complete(job.id, { fileId: file.id }, file.id);
+    await publishFresh(job.id);
+    if (file.backend === 'telegram') await enqueueFlush(job.user_id, file.id, suggestedName ?? file.name);
     log.info({ jobId: job.id, fileId: file.id, backend: file.backend }, 'اكتملت مهمة التحميل');
   } catch (e) {
-    const canceled = controller.signal.aborted || (e instanceof Error && e.message === 'CANCELED') || Jobs.isCancelRequested(job.id);
+    const canceled = controller.signal.aborted || (e instanceof Error && e.message === 'CANCELED') || (await Jobs.isCancelRequested(job.id));
     if (canceled) {
-      Jobs.markCanceled(job.id);
-      publishJob(Jobs.findById(job.id)!);
+      await Jobs.markCanceled(job.id);
+      await publishFresh(job.id);
       log.info({ jobId: job.id }, 'أُلغيت المهمة');
     } else {
-      const fresh = Jobs.findById(job.id);
+      const fresh = await Jobs.findById(job.id);
       const attempts = fresh?.attempts ?? job.attempts;
       const maxAttempts = fresh?.max_attempts ?? job.max_attempts;
       const message = e instanceof Error ? e.message : String(e);
-      if (attempts < maxAttempts) {
+      // أخطاء دائمة (أداة مفقودة/DRM/محتوى خاص) لا يُفيد إعادة المحاولة فيها
+      const permanent = e instanceof ytdlp.YtdlpUnavailableError || e instanceof ytdlp.YtdlpPermanentError;
+      if (!permanent && attempts < maxAttempts) {
         const delay = backoffDelay(attempts, { baseMs: 2000, maxMs: 120_000 });
-        Jobs.fail(job.id, message, Date.now() + delay);
+        await Jobs.fail(job.id, message, Date.now() + delay);
         log.warn({ jobId: job.id, attempts, retryInMs: delay, err: message }, 'فشلت المهمة، إعادة محاولة');
       } else {
-        Jobs.fail(job.id, message);
-        log.error({ jobId: job.id, err: message }, 'فشلت المهمة نهائيًّا');
+        await Jobs.fail(job.id, message);
+        log.error({ jobId: job.id, err: message, permanent }, 'فشلت المهمة نهائيًّا');
       }
-      publishJob(Jobs.findById(job.id)!);
+      await publishFresh(job.id);
     }
   } finally {
     clearInterval(renew);
@@ -286,22 +297,22 @@ async function runJob(job: JobRow): Promise<void> {
 async function runFlush(
   job: JobRow,
   signal: AbortSignal,
-  emit: (patch: Parameters<typeof Jobs.progress>[1]) => void,
+  emit: (patch: Parameters<typeof Jobs.progress>[1]) => Promise<void>,
 ): Promise<void> {
   const { fileId } = JSON.parse(job.payload) as { fileId: string };
-  const file = Files.findById(fileId);
+  const file = await Files.findById(fileId);
   if (!file) throw new Error('الملف غير موجود للرفع الدائم.');
 
-  const all = FileChunks.listByFile(fileId);
+  const all = await FileChunks.listByFile(fileId);
   const pending = all.filter((c) => !c.tg_file_id);
   const total = Math.max(1, all.length);
   let done = total - pending.length;
 
   for (const c of pending) {
-    if (signal.aborted || Jobs.isCancelRequested(job.id)) throw new Error('CANCELED');
+    if (signal.aborted || (await Jobs.isCancelRequested(job.id))) throw new Error('CANCELED');
     await flushChunkToTelegram(file, c, signal);
     done++;
-    emit({
+    await emit({
       stage: 'رفع إلى التخزين الدائم',
       progress: Math.min(99, (done / total) * 100),
       total_bytes: file.size,
@@ -309,9 +320,9 @@ async function runFlush(
     });
   }
 
-  Files.update(fileId, { status: 'ready' });
-  Jobs.complete(job.id, { fileId }, fileId);
-  publishJob(Jobs.findById(job.id)!);
+  await Files.update(fileId, { status: 'ready' });
+  await Jobs.complete(job.id, { fileId }, fileId);
+  await publishFresh(job.id);
   getLogger().info({ jobId: job.id, fileId }, 'اكتمل الرفع إلى Telegram');
 }
 
@@ -319,7 +330,7 @@ async function workerLoop(): Promise<void> {
   while (!stopped) {
     let job: JobRow | undefined;
     try {
-      job = Jobs.claimNext(workerId, LEASE_MS);
+      job = await Jobs.claimNext(workerId, LEASE_MS);
     } catch (e) {
       getLogger().error({ err: String(e) }, 'خطأ في سحب مهمة');
     }
@@ -333,10 +344,10 @@ async function workerLoop(): Promise<void> {
 }
 
 /** يبدأ عمّال الطابور حسب التزامن المضبوط. */
-export function startQueue(): void {
+export async function startQueue(): Promise<void> {
   const cfg = loadConfig();
   stopped = false;
-  Jobs.reclaimStale();
+  await Jobs.reclaimStale();
   for (let i = 0; i < cfg.queue.downloadConcurrency; i++) {
     loops.push(workerLoop());
   }

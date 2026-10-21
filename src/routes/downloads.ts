@@ -6,23 +6,11 @@ import { errors } from '../lib/errors.ts';
 import { requireUser } from '../plugins/auth.ts';
 import { Jobs } from '../db/repo.ts';
 import { assertPublicHost } from '../lib/ssrf.ts';
+import { isMediaHost } from '../lib/media-hosts.ts';
 import { probeDirect } from '../services/downloads.ts';
 import * as ytdlp from '../services/ytdlp.ts';
 import { enqueueDownload, requestCancel, retryJob, toApiJob } from '../services/queue.ts';
 import { extOf } from '../services/files.ts';
-
-// مواقع الوسائط التي تُعالَج عبر yt-dlp (أي رابط آخر يُعامَل تحميلًا مباشرًا).
-const MEDIA_HOSTS = [
-  'youtube.com', 'youtu.be', 'youtube-nocookie.com', 'music.youtube.com',
-  'vimeo.com', 'dailymotion.com', 'tiktok.com', 'instagram.com', 'facebook.com', 'fb.watch',
-  'twitter.com', 'x.com', 'twitch.tv', 'soundcloud.com', 'reddit.com', 'bilibili.com',
-  'ok.ru', 'rutube.ru', 'vk.com', 'pinterest.com', 'nicovideo.jp', 'bitchute.com', 'odysee.com',
-];
-
-function isMediaHost(hostname: string): boolean {
-  const h = hostname.toLowerCase().replace(/^www\./, '').replace(/^m\./, '');
-  return MEDIA_HOSTS.some((m) => h === m || h.endsWith('.' + m));
-}
 
 function hostnameOf(url: string): string {
   try {
@@ -91,6 +79,12 @@ export default async function downloadRoutes(app: FastifyInstance): Promise<void
     if (isMediaHost(hostname)) {
       try {
         const info = await ytdlp.probe(url);
+        if (info.isLive) {
+          return {
+            mode: 'error' as const,
+            message: 'البثّ المباشر (أو بثّ مجدول) غير مدعوم — انتظر انتهاء البثّ ثم أعد المحاولة.',
+          };
+        }
         return {
           mode: 'media' as const,
           title: info.title,
@@ -126,9 +120,15 @@ export default async function downloadRoutes(app: FastifyInstance): Promise<void
   app.post('/api/downloads', async (request) => {
     const user = requireUser(request);
     const body = parse(enqueueBody, request.body);
-    const check = await assertPublicHost(hostnameOf(body.url));
+    const hostname = hostnameOf(body.url);
+    const check = await assertPublicHost(hostname);
     if (!check.ok) throw errors.forbidden('رُفض الرابط لأسباب أمنية (SSRF).');
-    const job = enqueueDownload({
+    // وضع الوسائط يمرّ عبر yt-dlp الذي يتّبع تحويلات داخليًّا — نحصره في مواقع معروفة
+    // حتى لا يُستغلّ كوسيط SSRF نحو مضيفات أخرى (حتى لو كانت العلاقة الأماميّة تحقّقت).
+    if (body.mode === 'media' && !isMediaHost(hostname)) {
+      throw errors.badRequest('هذا الرابط ليس من موقع وسائط مدعوم — اختر التحميل المباشر للملفّات.');
+    }
+    const job = await enqueueDownload({
       userId: user.id,
       url: body.url,
       mode: body.mode,
@@ -145,19 +145,20 @@ export default async function downloadRoutes(app: FastifyInstance): Promise<void
     const status = (request.query as { status?: string }).status;
     const statuses =
       status === 'active' ? ['queued', 'running'] : status === 'done' ? ['done'] : undefined;
-    return { jobs: Jobs.listByUser(user.id, statuses).map(toApiJob) };
+    const jobs = await Jobs.listByUser(user.id, statuses);
+    return { jobs: jobs.map(toApiJob) };
   });
 
   app.post('/api/downloads/jobs/:id/cancel', async (request) => {
     const user = requireUser(request);
-    const ok = requestCancel(user.id, (request.params as { id: string }).id);
+    const ok = await requestCancel(user.id, (request.params as { id: string }).id);
     if (!ok) throw errors.notFound('المهمة غير موجودة.');
     return { ok: true };
   });
 
   app.post('/api/downloads/jobs/:id/retry', async (request) => {
     const user = requireUser(request);
-    const ok = retryJob(user.id, (request.params as { id: string }).id);
+    const ok = await retryJob(user.id, (request.params as { id: string }).id);
     if (!ok) throw errors.badRequest('تعذّرت إعادة المحاولة لهذه المهمة.');
     return { ok: true };
   });

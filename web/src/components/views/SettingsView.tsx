@@ -15,6 +15,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [system, setSystem] = useState<Awaited<ReturnType<typeof api.system>> | null>(null);
+  const [apiKeys, setApiKeys] = useState<Awaited<ReturnType<typeof api.account.apiKeys.list>>['keys']>([]);
+  const [apiKeyLabel, setApiKeyLabel] = useState('');
+  const [createdApiKey, setCreatedApiKey] = useState<string | null>(null);
+  const [createdApiKeyId, setCreatedApiKeyId] = useState<string | null>(null);
+  const [apiKeyMessage, setApiKeyMessage] = useState<string | null>(null);
+  const [apiKeysBusy, setApiKeysBusy] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -31,6 +37,54 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
       .catch((error: unknown) => setLoadError(error instanceof Error ? error.message : 'تعذّر تحميل الإعدادات.'))
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    let active = true;
+    api.account.apiKeys.list()
+      .then(({ keys }) => {
+        if (active) setApiKeys(keys);
+      })
+      .catch((error: unknown) => {
+        if (active) setApiKeyMessage(error instanceof Error ? error.message : 'Unable to load API keys.');
+      });
+    return () => { active = false; };
+  }, []);
+
+  const createApiKey = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setApiKeysBusy(true);
+    setApiKeyMessage(null);
+    setCreatedApiKey(null);
+    setCreatedApiKeyId(null);
+    try {
+      const result = await api.account.apiKeys.create(apiKeyLabel);
+      setCreatedApiKey(result.key);
+      setCreatedApiKeyId(result.metadata.id);
+      setApiKeyLabel('');
+      setApiKeys((await api.account.apiKeys.list()).keys);
+    } catch (error) {
+      setApiKeyMessage(error instanceof Error ? error.message : 'Unable to create API key.');
+    } finally {
+      setApiKeysBusy(false);
+    }
+  };
+
+  const revokeApiKey = async (id: string) => {
+    setApiKeysBusy(true);
+    setApiKeyMessage(null);
+    try {
+      await api.account.apiKeys.revoke(id);
+      setApiKeys((await api.account.apiKeys.list()).keys);
+      if (id === createdApiKeyId) {
+        setCreatedApiKey(null);
+        setCreatedApiKeyId(null);
+      }
+    } catch (error) {
+      setApiKeyMessage(error instanceof Error ? error.message : 'Unable to revoke API key.');
+    } finally {
+      setApiKeysBusy(false);
+    }
+  };
 
   const [cookiesPresent, setCookiesPresent] = useState(false);
   const [cookiesText, setCookiesText] = useState('');
@@ -126,6 +180,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
             <label className="space-y-1.5"><span className="block font-mono text-xs text-outline">Current password</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
             <label className="space-y-1.5"><span className="block font-mono text-xs text-outline">New password</span><input type="password" autoComplete="new-password" minLength={8} value={nextPassword} onChange={(event) => setNextPassword(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
           </div>
+        </section>
+
+        <section className="p-6 rounded-xl bg-surface-container-low border border-white/5 space-y-4 shadow-xl">
+          <div className="flex items-start justify-between gap-3">
+            <div><h2 className="text-base font-semibold text-on-surface">Developer API keys</h2><p className="text-xs text-outline mt-0.5">Keys grant access to your files. The full value is shown only once.</p></div>
+            <a href="/developers" target="_blank" rel="noreferrer" className="text-xs text-primary underline">API documentation</a>
+          </div>
+          <form onSubmit={(event) => void createApiKey(event)} className="flex flex-col sm:flex-row gap-2">
+            <input aria-label="API key label" required maxLength={100} value={apiKeyLabel} onChange={(event) => setApiKeyLabel(event.target.value)} placeholder="Key label (e.g. backup script)" className="min-w-0 flex-1 bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" />
+            <button type="submit" disabled={apiKeysBusy || !apiKeyLabel.trim()} className="px-4 py-2 rounded-lg bg-primary-container text-on-primary-container font-mono text-xs font-semibold disabled:opacity-50">Generate key</button>
+          </form>
+          {createdApiKey && <div role="alert" className="space-y-2 rounded-lg border border-error/40 bg-error-container/10 p-3">
+            <p className="text-xs text-error">Copy this key now. It cannot be displayed again.</p>
+            <input aria-label="New API key" readOnly value={createdApiKey} onFocus={(event) => event.currentTarget.select()} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface font-mono text-xs p-3 rounded-lg" />
+            <button type="button" onClick={() => setCreatedApiKey(null)} className="text-xs text-outline underline">Hide key</button>
+          </div>}
+          <ul className="divide-y divide-white/5">
+            {apiKeys.map((key) => <li key={key.id} className="flex items-center justify-between gap-3 py-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm text-on-surface">{key.label} <code className="ml-2 font-mono text-xs text-outline">{key.prefix}…</code></p>
+                <p className="text-xs text-outline">{key.revokedAt ? 'Revoked' : key.lastUsedAt ? `Last used ${new Date(key.lastUsedAt).toLocaleString()}` : 'Not used yet'}</p>
+              </div>
+              {!key.revokedAt && <button type="button" disabled={apiKeysBusy} onClick={() => void revokeApiKey(key.id)} className="shrink-0 text-xs text-error underline disabled:opacity-50">Revoke</button>}
+            </li>)}
+            {apiKeys.length === 0 && <li className="py-3 text-xs text-outline">No API keys have been created.</li>}
+          </ul>
+          {apiKeyMessage && <p role="alert" className="text-sm text-error">{apiKeyMessage}</p>}
         </section>
 
         <section className="p-6 rounded-xl bg-surface-container-low border border-white/5 space-y-4 shadow-xl">

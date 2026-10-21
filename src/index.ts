@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from './config/env.ts';
 import { getLogger } from './lib/logger.ts';
-import { getDb, closeDb } from './db/db.ts';
+import { closePool, ping } from './db/pg.ts';
 import { runMigrations } from './db/migrate.ts';
 import { ensureOwner } from './services/auth.ts';
 import { buildServer } from './server.ts';
@@ -18,9 +18,9 @@ async function main(): Promise<void> {
   mkdirSync(path.resolve(cfg.storage.localDir), { recursive: true });
   mkdirSync(path.resolve(cfg.storage.tmpDir), { recursive: true });
 
-  // القاعدة + الهجرات + المالك
-  const db = getDb();
-  runMigrations(db);
+  // القاعدة (Supabase/Postgres) + التحقّق من المخطّط + المالك
+  await ping();
+  await runMigrations();
   await ensureOwner();
 
   const app = await buildServer();
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     } catch (e) {
       log.error({ err: String(e) }, 'خطأ أثناء الإيقاف');
     } finally {
-      closeDb();
+      await closePool();
       process.exit(0);
     }
   };

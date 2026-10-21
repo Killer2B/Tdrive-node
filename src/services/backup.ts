@@ -1,11 +1,11 @@
-/** النسخ الاحتياطي الدوريّ: SQLite (التطبيق) + MySQL الخارجية إلى نظام التخزين الداخلي. */
-import { createReadStream, createWriteStream } from 'node:fs';
+/** النسخ الاحتياطي الدوريّ: Postgres (التطبيق) + MySQL الخارجية إلى نظام التخزين الداخلي. */
+import { createWriteStream } from 'node:fs';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import { createGzip } from 'node:zlib';
 import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
-import { getDb } from '../db/db.ts';
+import { getPool, getSchema, tb } from '../db/pg.ts';
 import { getStorage } from '../storage/index.ts';
 import { loadConfig } from '../config/env.ts';
 import { getLogger } from '../lib/logger.ts';
@@ -15,31 +15,72 @@ function stamp(d = new Date()): string {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}_${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}`;
 }
 
-async function gzipFile(src: string, dest: string): Promise<void> {
-  await pipeline(createReadStream(src), createGzip(), createWriteStream(dest));
+function sqlLiteral(v: unknown): string {
+  if (v === null || v === undefined) return 'NULL';
+  if (typeof v === 'number') return Number.isFinite(v) ? String(v) : 'NULL';
+  if (typeof v === 'bigint') return v.toString();
+  if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+  if (v instanceof Date) return `'${v.toISOString()}'`;
+  if (typeof v === 'object') return `'${JSON.stringify(v).replace(/'/g, "''")}'::jsonb`;
+  return `'${String(v).replace(/'/g, "''")}'`;
 }
 
-/** نسخة SQLite احتياطية متّسقة عبر backup API ثم ضغطها. */
-async function backupSqlite(ts: string): Promise<{ key: string; bytes: number } | null> {
+/** تفريغ مخطّط Postgres (التطبيق) وبياناته إلى ملف SQL مضغوط عبر قراءة متّسقة. */
+async function backupPostgres(ts: string): Promise<{ key: string; bytes: number } | null> {
   const cfg = loadConfig();
   const log = getLogger();
   const tmpDir = path.join(cfg.storage.tmpDir, 'backup');
   await mkdir(tmpDir, { recursive: true });
-  const snap = path.join(tmpDir, `tdrive-${ts}.sqlite`);
-  const gz = `${snap}.gz`;
+  const dumpGz = path.join(tmpDir, `postgres-${ts}.sql.gz`);
+
+  const gzip = createGzip();
+  const out = createWriteStream(dumpGz);
+  const writePipe = pipeline(gzip, out);
+
+  const write = async (s: string): Promise<void> => {
+    if (!gzip.write(s)) await once(gzip, 'drain');
+  };
+
+  const client = await getPool().connect();
   try {
-    await getDb().backup(snap);
-    await gzipFile(snap, gz);
-    const key = `${cfg.backup.prefix}/sqlite/tdrive-${ts}.sqlite.gz`;
-    const res = await getStorage().putFile(key, gz, { contentType: 'application/gzip' });
-    await rm(snap, { force: true }).catch(() => {});
-    log.info({ key, bytes: res.size }, 'نسخة SQLite احتياطية');
+    await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+    await write(`-- Tdrive Postgres backup\n-- ${new Date().toISOString()}\n\n`);
+
+    const schema = getSchema();
+    const { rows: tableRows } = await client.query<{ table_name: string }>(
+      'SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = $2 ORDER BY table_name',
+      [schema, 'BASE TABLE'],
+    );
+    const tables = tableRows.map((r) => r.table_name).filter((n) => n !== 'schema_migrations');
+
+    for (const name of tables) {
+      await write(`\n-- ----- ${name} -----\nTRUNCATE TABLE ${tb(name)} CASCADE;\n`);
+      const { rows } = await client.query(`SELECT * FROM ${tb(name)}`);
+      if (rows.length === 0) continue;
+      const cols = Object.keys(rows[0]);
+      const colSql = cols.map((c) => `"${c}"`).join(', ');
+      const values = rows
+        .map((r) => `(${cols.map((c) => sqlLiteral((r as Record<string, unknown>)[c])).join(', ')})`)
+        .join(',\n');
+      await write(`INSERT INTO ${tb(name)} (${colSql}) VALUES\n${values};\n`);
+    }
+
+    await client.query('COMMIT');
+    gzip.end();
+    await writePipe;
+
+    const key = `${cfg.backup.prefix}/postgres/postgres-${ts}.sql.gz`;
+    const res = await getStorage().putFile(key, dumpGz, { contentType: 'application/gzip' });
+    log.info({ key, bytes: res.size }, 'نسخة Postgres احتياطية');
     return { key, bytes: res.size };
   } catch (e) {
-    log.error({ err: String(e) }, 'فشل النسخ الاحتياطي لـ SQLite');
-    await rm(snap, { force: true }).catch(() => {});
-    await rm(gz, { force: true }).catch(() => {});
+    log.error({ err: String(e) }, 'فشل النسخ الاحتياطي لـ Postgres');
+    await client.query('ROLLBACK').catch(() => {});
+    gzip.destroy();
+    await rm(dumpGz, { force: true }).catch(() => {});
     return null;
+  } finally {
+    client.release();
   }
 }
 
@@ -130,7 +171,7 @@ export interface BackupSummary {
   results: Array<{ kind: string; key: string; bytes: number }>;
 }
 
-/** يشغّل نسخة احتياطية كاملة (SQLite + MySQL إن ضُبطت). */
+/** يشغّل نسخة احتياطية كاملة (Postgres + MySQL إن ضُبطت). */
 export async function runBackup(reason = 'scheduled'): Promise<BackupSummary> {
   const cfg = loadConfig();
   const log = getLogger();
@@ -138,10 +179,10 @@ export async function runBackup(reason = 'scheduled'): Promise<BackupSummary> {
   log.info({ reason, ts }, 'بدء النسخ الاحتياطي');
   const results: BackupSummary['results'] = [];
 
-  const sqliteRes = await backupSqlite(ts);
-  if (sqliteRes) {
-    results.push({ kind: 'sqlite', ...sqliteRes });
-    await enforceRetention('sqlite', cfg.backup.retention).catch(() => {});
+  const postgresRes = await backupPostgres(ts);
+  if (postgresRes) {
+    results.push({ kind: 'postgres', ...postgresRes });
+    await enforceRetention('postgres', cfg.backup.retention).catch(() => {});
   }
 
   if (cfg.backup.mysqlUrl) {

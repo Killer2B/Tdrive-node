@@ -1,5 +1,5 @@
 /** أمر CLI لإنشاء/تحديث كلمة مرور المالك: npm run owner:set -- <username> <password> */
-import { getDb, closeDb } from '../db/db.ts';
+import { closePool, ping } from '../db/pg.ts';
 import { runMigrations } from '../db/migrate.ts';
 import { setOwner } from '../services/auth.ts';
 
@@ -11,12 +11,13 @@ if (!username || !password) {
 }
 
 try {
-  runMigrations(getDb());
+  await ping();
+  await runMigrations();
   await setOwner(username, password);
   console.log(`تمّ ضبط المالك: ${username}`);
 } catch (e) {
   console.error('فشل:', e);
   process.exitCode = 1;
 } finally {
-  closeDb();
+  await closePool();
 }

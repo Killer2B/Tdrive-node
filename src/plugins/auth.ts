@@ -16,12 +16,12 @@ declare module 'fastify' {
 }
 
 /** يملأ request.user من كوكي موقّع صالح (لا يرمي). */
-export function attachUser(request: FastifyRequest): void {
+export async function attachUser(request: FastifyRequest): Promise<void> {
   const raw = request.cookies?.[SESSION_COOKIE];
   if (!raw) return;
   const unsigned = request.unsignCookie(raw);
   if (!unsigned.valid || !unsigned.value) return;
-  const user = getUserFromSession(unsigned.value);
+  const user = await getUserFromSession(unsigned.value);
   if (user) {
     request.user = user;
     request.sessionId = unsigned.value;
@@ -46,7 +46,7 @@ function checkOrigin(request: FastifyRequest): void {
 
 /** preHandler للمسارات المحمية. */
 export async function authGuard(request: FastifyRequest, _reply: FastifyReply): Promise<void> {
-  attachUser(request);
+  await attachUser(request);
   if (!request.user) throw errors.unauthorized();
   checkOrigin(request);
 }

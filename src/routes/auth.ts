@@ -31,7 +31,7 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
         ip: request.ip,
       });
       if (!result) throw errors.unauthorized('اسم المستخدم أو كلمة المرور غير صحيحة.');
-      Activity.record({ userId: result.user.id, action: 'login', targetType: 'session', targetId: result.sessionId, ip: request.ip });
+      await Activity.record({ userId: result.user.id, action: 'login', targetType: 'session', targetId: result.sessionId, ip: request.ip });
       reply.setCookie(SESSION_COOKIE, result.sessionId, {
         httpOnly: true,
         sameSite: 'lax',
@@ -45,9 +45,9 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.post('/api/auth/logout', async (request, reply) => {
-    attachUser(request);
+    await attachUser(request);
     if (request.user) {
-      Activity.record({
+      await Activity.record({
         userId: request.user.id,
         action: 'logout',
         targetType: 'session',
@@ -55,13 +55,13 @@ export default async function authRoutes(app: FastifyInstance): Promise<void> {
         ip: request.ip,
       });
     }
-    if (request.sessionId) logout(request.sessionId);
+    if (request.sessionId) await logout(request.sessionId);
     reply.clearCookie(SESSION_COOKIE, { path: '/' });
     return { ok: true };
   });
 
   app.get('/api/auth/session', async (request, reply) => {
-    attachUser(request);
+    await attachUser(request);
     if (!request.user) {
       reply.code(401);
       return { user: null };

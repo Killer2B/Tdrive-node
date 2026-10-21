@@ -289,6 +289,15 @@ export const account = {
       method: 'POST',
       body: JSON.stringify({ current, next }),
     }),
+  apiKeys: {
+    list: () => req<{ keys: { id: string; label: string; prefix: string; createdAt: number; lastUsedAt: number | null; revokedAt: number | null }[] }>('/api/account/api-keys'),
+    create: (label: string) =>
+      req<{ key: string; metadata: { id: string; label: string; prefix: string; createdAt: number; lastUsedAt: number | null; revokedAt: number | null } }>(
+        '/api/account/api-keys',
+        { method: 'POST', body: JSON.stringify({ label }) },
+      ),
+    revoke: (id: string) => req<{ ok: boolean }>(`/api/account/api-keys/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  },
 };
 
 // ===== المشاركة العامّة (بلا تسجيل دخول) =====

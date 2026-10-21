@@ -16,9 +16,9 @@ function targetType(fileType: string): 'folder' | 'video' | 'doc' | 'bin' {
   return 'bin';
 }
 
-export function toApiShare(s: ShareRow): Record<string, unknown> {
+export async function toApiShare(s: ShareRow): Promise<Record<string, unknown>> {
   const cfg = loadConfig();
-  const file = s.file_id ? Files.findById(s.file_id) : undefined;
+  const file = s.file_id ? await Files.findById(s.file_id) : undefined;
   const expired = !!s.expires_at && s.expires_at < Date.now();
   const safeguards: Array<{ label: string; icon: string; highlight?: boolean }> = [];
   if (s.password_hash) safeguards.push({ label: 'كلمة مرور', icon: 'key', highlight: true });
@@ -43,6 +43,7 @@ export function toApiShare(s: ShareRow): Record<string, unknown> {
     isRevoked: !!s.revoked,
     isExpired: expired,
     ipAllow: s.ip_allow,
+    permission: s.permission,
   };
 }
 
@@ -60,10 +61,10 @@ export default async function shareRoutes(app: FastifyInstance): Promise<void> {
     const user = requireUser(request);
     const body = parse(createBody, request.body);
     if (body.ipAllow && !validateIpAllow(body.ipAllow)) throw errors.badRequest('قائمة IP غير صالحة.');
-    const file = Files.findById(body.fileId);
+    const file = await Files.findById(body.fileId);
     if (!file || file.user_id !== user.id) throw errors.badRequest('الملف غير موجود.');
 
-    const share = Shares.create({
+    const share = await Shares.create({
       user_id: user.id,
       file_id: file.id,
       folder_id: null,
@@ -74,7 +75,7 @@ export default async function shareRoutes(app: FastifyInstance): Promise<void> {
       max_downloads: body.maxDownloads ?? null,
       ip_allow: body.ipAllow?.trim() || null,
     });
-    Activity.record({
+    await Activity.record({
       userId: user.id,
       action: 'share_created',
       targetType: 'share',
@@ -82,29 +83,30 @@ export default async function shareRoutes(app: FastifyInstance): Promise<void> {
       targetName: file.name,
       ip: request.ip,
     });
-    return { link: toApiShare(share) };
+    return { link: await toApiShare(share) };
   });
 
   app.get('/api/shares', async (request) => {
     const user = requireUser(request);
-    return { links: Shares.listByUser(user.id).map(toApiShare) };
+    const rows = await Shares.listByUser(user.id);
+    return { links: await Promise.all(rows.map((s) => toApiShare(s))) };
   });
 
   app.post('/api/shares/:id/revoke', async (request) => {
     const user = requireUser(request);
-    const share = Shares.findById((request.params as { id: string }).id);
+    const share = await Shares.findById((request.params as { id: string }).id);
     if (!share || share.user_id !== user.id) throw errors.notFound('المشاركة غير موجودة.');
-    Shares.revoke(share.id);
-    Activity.record({ userId: user.id, action: 'share_revoked', targetType: 'share', targetId: share.id, ip: request.ip });
+    await Shares.revoke(share.id);
+    await Activity.record({ userId: user.id, action: 'share_revoked', targetType: 'share', targetId: share.id, ip: request.ip });
     return { ok: true };
   });
 
   app.delete('/api/shares/:id', async (request) => {
     const user = requireUser(request);
-    const share = Shares.findById((request.params as { id: string }).id);
+    const share = await Shares.findById((request.params as { id: string }).id);
     if (!share || share.user_id !== user.id) throw errors.notFound('المشاركة غير موجودة.');
-    Shares.delete(share.id);
-    Activity.record({ userId: user.id, action: 'share_deleted', targetType: 'share', targetId: share.id, ip: request.ip });
+    await Shares.delete(share.id);
+    await Activity.record({ userId: user.id, action: 'share_deleted', targetType: 'share', targetId: share.id, ip: request.ip });
     return { ok: true };
   });
 }

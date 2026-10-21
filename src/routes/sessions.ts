@@ -50,16 +50,17 @@ function toClientNode(s: SessionRow, currentId?: string): Record<string, unknown
 export default async function sessionRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/sessions', async (request) => {
     const user = requireUser(request);
-    return { nodes: Sessions.listByUser(user.id).map((s) => toClientNode(s, request.sessionId)) };
+    const rows = await Sessions.listByUser(user.id);
+    return { nodes: rows.map((s) => toClientNode(s, request.sessionId)) };
   });
 
   app.post('/api/sessions/:id/revoke', async (request) => {
     const user = requireUser(request);
     const id = (request.params as { id: string }).id;
-    const s = Sessions.find(id);
+    const s = await Sessions.find(id);
     if (!s || s.user_id !== user.id) throw errors.notFound('الجلسة غير موجودة.');
-    Sessions.delete(id);
-    Activity.record({ userId: user.id, action: 'session_revoked', targetType: 'session', targetId: id, ip: request.ip });
+    await Sessions.delete(id);
+    await Activity.record({ userId: user.id, action: 'session_revoked', targetType: 'session', targetId: id, ip: request.ip });
     return { ok: true };
   });
 }
