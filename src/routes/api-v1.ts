@@ -9,7 +9,7 @@ import { completeUpload, initUpload, uploadPart, uploadStatus, abortUpload } fro
 import { deleteFilePermanent, restoreFile, storageUsage, trashFile } from '../services/files.ts';
 import { createFolderAtPath, folderPath, resolveFolderPath } from '../services/folders.ts';
 import { FileChunks, Files, Folders, Shares, Uploads, Users, type FileRow, type UserRow } from '../db/repo.ts';
-import { getDb } from '../db/db.ts';
+import { tb, withTransaction } from '../db/pg.ts';
 import { errors, isAppError } from '../lib/errors.ts';
 import { normalizeVirtualPath } from '../lib/paths.ts';
 import { randomBase64Url } from '../lib/ids.ts';
@@ -53,12 +53,12 @@ function requireApiUser(request: FastifyRequest): UserRow {
   return request.user;
 }
 
-function apiFile(file: FileRow): Record<string, unknown> {
-  const chunks = FileChunks.listByFile(file.id);
+async function apiFile(file: FileRow): Promise<Record<string, unknown>> {
+  const chunks = await FileChunks.listByFile(file.id);
   return {
     id: file.id,
     name: file.name,
-    path: folderPath(file.user_id, file.folder_id),
+    path: await folderPath(file.user_id, file.folder_id),
     size: file.size,
     content_type: file.mime ?? 'application/octet-stream',
     created_at: new Date(file.created_at).toISOString(),
@@ -70,8 +70,13 @@ function apiFile(file: FileRow): Record<string, unknown> {
   };
 }
 
-function ownFile(userId: string, id: string): FileRow {
-  const file = Files.findById(id);
+/** يحوّل قائمة ملفّات إلى تمثيل الـ API بالتوازي. */
+async function mapFiles(files: FileRow[]): Promise<Array<Record<string, unknown>>> {
+  return Promise.all(files.map((file) => apiFile(file)));
+}
+
+async function ownFile(userId: string, id: string): Promise<FileRow> {
+  const file = await Files.findById(id);
   if (!file || file.user_id !== userId) throw errors.notFound('الملف غير موجود.');
   return file;
 }
@@ -134,9 +139,9 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
     ) return;
     if (request.method === 'OPTIONS') return;
     const key = requestKey(request);
-    const auth = key ? authenticateApiKey(key) : null;
+    const auth = key ? await authenticateApiKey(key) : null;
     if (!auth) throw errors.unauthorized('Provide a valid API key using Authorization: Bearer or X-API-Key.');
-    const user = Users.findById(auth.userId);
+    const user = await Users.findById(auth.userId);
     if (!user) throw errors.unauthorized();
     request.user = user;
   });
@@ -212,7 +217,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
 
   app.get(`${API_ROOT}/me`, async (request) => {
     const user = requireApiUser(request);
-    return apiOk({ id: user.id, username: user.username, role: user.role, storage: storageUsage(user.id) });
+    return apiOk({ id: user.id, username: user.username, role: user.role, storage: await storageUsage(user.id) });
   });
 
   app.get(`${API_ROOT}/files`, async (request) => {
@@ -228,11 +233,11 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       query,
     );
     const path = apiPath(params.path ?? '/');
-    const parent = resolveFolderPath(user.id, path);
-    const children = Folders.listChildren(user.id, parent?.id ?? null).map((folder) => folder.name);
+    const parent = await resolveFolderPath(user.id, path);
+    const children = (await Folders.listChildren(user.id, parent?.id ?? null)).map((folder) => folder.name);
     const requestedSort = params.sort ?? 'newest';
     const sort = sortOptions(requestedSort);
-    const rows = Files.list(user.id, {
+    const rows = await Files.list(user.id, {
       folderId: parent?.id ?? null,
       sort: sort.sort,
       order: sort.order,
@@ -247,7 +252,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       path,
       sort: requestedSort,
       folders: children,
-      files: files.map(apiFile),
+      files: await mapFiles(files),
       nextOffset: more ? offset + limit : null,
     });
   });
@@ -272,16 +277,16 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
     const length = Number(request.headers['content-length']);
     if (!Number.isSafeInteger(length) || length < 0) throw errors.badRequest('A valid Content-Length header is required.');
     if (length > cfg.upload.chunkSize) throw errors.payloadTooLarge('One-shot uploads are limited to one configured chunk.');
-    const folder = resolveFolderPath(user.id, apiPath(params.path ?? '/'));
+    const folder = await resolveFolderPath(user.id, apiPath(params.path ?? '/'));
     const idempotency = request.headers['idempotency-key'];
     const clientKey = typeof idempotency === 'string' && idempotency.length >= 8
       ? `api:${idempotency.slice(0, 120)}`
       : `api:${randomBase64Url(24)}`;
-    const previous = Uploads.findByClientKey(user.id, clientKey);
+    const previous = await Uploads.findByClientKey(user.id, clientKey);
     if (previous && (previous.name !== name || previous.size !== length || previous.folder_id !== (folder?.id ?? null))) {
       throw errors.conflict('Idempotency-Key was already used for a different upload.');
     }
-    const started = initUpload({
+    const started = await initUpload({
       userId: user.id,
       clientKey,
       folderId: folder?.id ?? null,
@@ -290,8 +295,8 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       size: length,
     });
     if (started.completed && started.file) {
-      const existing = Files.findById(String(started.file.id));
-      return reply.code(200).send(apiOk({ file: existing ? apiFile(existing) : started.file }));
+      const existing = await Files.findById(String(started.file.id));
+      return reply.code(200).send(apiOk({ file: existing ? await apiFile(existing) : started.file }));
     }
     if (length > 0) {
       const body = request.body as Readable | undefined;
@@ -307,8 +312,8 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       });
     }
     const result = await completeUpload({ userId: user.id, uploadId: started.uploadId });
-    const file = Files.findById(result.fileRow.id);
-    Activity.record({
+    const file = await Files.findById(result.fileRow.id);
+    await Activity.record({
       userId: user.id,
       action: 'upload',
       targetType: 'file',
@@ -317,19 +322,19 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       ip: request.ip,
       meta: { sizeBytes: result.fileRow.size },
     });
-    return reply.code(201).send(apiOk({ file: file ? apiFile(file) : result.file }));
+    return reply.code(201).send(apiOk({ file: file ? await apiFile(file) : result.file }));
   });
 
   app.get(`${API_ROOT}/files/:id`, async (request) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
-    return apiOk({ file: apiFile(file) });
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
+    return apiOk({ file: await apiFile(file) });
   });
 
   app.get(`${API_ROOT}/files/:id/chunks`, async (request) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
-    const chunks = FileChunks.listByFile(file.id);
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
+    const chunks = await FileChunks.listByFile(file.id);
     let offset = 0;
     const manifest = chunks.map((chunk) => {
       const part = { idx: chunk.idx, offset, size: chunk.size, checksum: chunk.sha256 };
@@ -341,9 +346,9 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
 
   app.post(`${API_ROOT}/files/:id/delta`, async (request) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
     const body = parse(z.object({ checksums: z.array(z.string().regex(/^[a-f0-9]{64}$/i)).max(100_000) }), request.body);
-    const chunks = FileChunks.listByFile(file.id);
+    const chunks = await FileChunks.listByFile(file.id);
     const changed = chunks.filter((chunk) => body.checksums[chunk.idx]?.toLowerCase() !== chunk.sha256?.toLowerCase());
     const changedIndexes = changed.map((chunk) => chunk.idx);
     const ranges: Array<[number, number]> = [];
@@ -362,7 +367,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
 
   app.get(`${API_ROOT}/files/:id/content`, async (request, reply) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
     return serveFileRange(request, reply, file, {
       attachment: (request.query as { download?: string }).download === '1',
     });
@@ -370,7 +375,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
 
   app.patch(`${API_ROOT}/files/:id`, async (request) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
     const body = parse(
       z.object({
         name: z.string().min(1).max(256).optional(),
@@ -379,38 +384,38 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       }).strict(),
       request.body,
     );
-    const folder = body.path === undefined ? null : resolveFolderPath(user.id, apiPath(body.path));
+    const folder = body.path === undefined ? null : await resolveFolderPath(user.id, apiPath(body.path));
     const patch: Partial<FileRow> = {};
     const targetFolder = body.path === undefined ? file.folder_id : folder?.id ?? null;
     if (body.name !== undefined) {
-      const collision = Files.findByFolderAndName(user.id, targetFolder, body.name);
+      const collision = await Files.findByFolderAndName(user.id, targetFolder, body.name);
       if (collision && collision.id !== file.id) throw errors.conflict('A file with this name already exists in the destination.');
     }
     if (body.favorite !== undefined) patch.starred = body.favorite ? 1 : 0;
     if (body.path !== undefined) patch.folder_id = folder?.id ?? null;
     if (body.name !== undefined) patch.name = body.name;
     if (Object.keys(patch).length === 0) throw errors.badRequest('No supported metadata fields were provided.');
-    Files.update(file.id, patch);
-    return apiOk({ file: apiFile(Files.findById(file.id)!) });
+    await Files.update(file.id, patch);
+    return apiOk({ file: await apiFile((await Files.findById(file.id))!) });
   });
 
   app.delete(`${API_ROOT}/files/:id`, async (request, reply) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
     const permanent = (request.query as { permanent?: string }).permanent === '1';
     if (permanent) {
       await deleteFilePermanent(file);
       return reply.code(202).send(apiOk({ id: file.id, deleted: 'permanent', queued: false }));
     }
-    trashFile(file);
+    await trashFile(file);
     return apiOk({ id: file.id, deleted: 'trash' });
   });
 
   app.get(`${API_ROOT}/folders`, async (request) => {
     const user = requireApiUser(request);
     const query = parse(z.object({ path: z.string().max(1024).default('/') }), request.query);
-    const parent = resolveFolderPath(user.id, apiPath(query.path ?? '/'));
-    const folders = Folders.listChildren(user.id, parent?.id ?? null);
+    const parent = await resolveFolderPath(user.id, apiPath(query.path ?? '/'));
+    const folders = await Folders.listChildren(user.id, parent?.id ?? null);
     const folderPathValue = apiPath(query.path ?? '/');
     return apiOk({ path: folderPathValue, folders: folders.map((folder) => ({ id: folder.id, name: folder.name, path: folder.path, created_at: new Date(folder.created_at).toISOString() })) });
   });
@@ -418,7 +423,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
   app.post(`${API_ROOT}/folders`, async (request, reply) => {
     const user = requireApiUser(request);
     const body = parse(z.object({ name: z.string().min(1).max(200), path: z.string().max(1024).default('/') }), request.body);
-    const folder = createFolderAtPath(user.id, apiPath(body.path ?? '/'), body.name);
+    const folder = await createFolderAtPath(user.id, apiPath(body.path ?? '/'), body.name);
     return reply.code(201).send(apiOk({ folder: { id: folder.id, name: folder.name, path: folder.path } }));
   });
 
@@ -428,45 +433,43 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       z.object({ path: z.string().max(1024).default('/'), name: z.string().min(1).max(200), newName: z.string().min(1).max(200) }),
       request.body,
     );
-    const parent = resolveFolderPath(user.id, apiPath(body.path ?? '/'));
-    const folder = Folders.findByParentName(user.id, parent?.id ?? null, body.name);
+    const parent = await resolveFolderPath(user.id, apiPath(body.path ?? '/'));
+    const folder = await Folders.findByParentName(user.id, parent?.id ?? null, body.name);
     if (!folder) throw errors.notFound('المجلّد غير موجود.');
     const safeName = body.newName.trim();
-    if (Folders.findByParentName(user.id, parent?.id ?? null, safeName)) throw errors.conflict('يوجد مجلّد بهذا الاسم.');
+    if (await Folders.findByParentName(user.id, parent?.id ?? null, safeName)) throw errors.conflict('يوجد مجلّد بهذا الاسم.');
     const newPath = apiPath(`${body.path ?? '/'}/${safeName}`);
-    const db = getDb();
-    const tx = db.transaction(() => {
-      Folders.rename(folder.id, safeName, newPath);
-      db.prepare(
-        `UPDATE folders SET path = @new || substr(path, @oldLen + 1), updated_at = @ts
-         WHERE user_id = @uid AND path LIKE @like ESCAPE '\\'`,
-      ).run({
-        new: newPath,
-        oldLen: folder.path.length,
-        ts: Date.now(),
-        uid: user.id,
-        like: `${folder.path.replace(/[%_]/g, (match) => `\\${match}`)}/%`,
-      });
+    const prefix = `${folder.path}/`;
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE ${tb('folders')} SET name = $1, path = $2, updated_at = $3 WHERE id = $4`,
+        [safeName, newPath, Date.now(), folder.id],
+      );
+      // تحديث مسارات كل الأبناء في نفس المعاملة
+      await client.query(
+        `UPDATE ${tb('folders')} SET path = $1 || substr(path, $2 + 1), updated_at = $3
+         WHERE user_id = $4 AND starts_with(path, $5) AND path <> $5`,
+        [newPath, folder.path.length, Date.now(), user.id, prefix],
+      );
     });
-    tx();
     return apiOk({ folder: { id: folder.id, name: safeName, path: newPath } });
   });
 
   app.delete(`${API_ROOT}/folders`, async (request) => {
     const user = requireApiUser(request);
     const query = parse(z.object({ path: z.string().max(1024).default('/'), name: z.string().min(1).max(200) }), request.query);
-    const parent = resolveFolderPath(user.id, apiPath(query.path ?? '/'));
-    const folder = Folders.findByParentName(user.id, parent?.id ?? null, query.name);
+    const parent = await resolveFolderPath(user.id, apiPath(query.path ?? '/'));
+    const folder = await Folders.findByParentName(user.id, parent?.id ?? null, query.name);
     if (!folder) throw errors.notFound('المجلّد غير موجود.');
-    const descendants = Folders.listChildren(user.id, folder.id);
+    const descendants = await Folders.listChildren(user.id, folder.id);
     const pending = [...descendants, folder];
     for (let index = 0; index < pending.length; index++) {
-      pending.push(...Folders.listChildren(user.id, pending[index].id));
+      pending.push(...(await Folders.listChildren(user.id, pending[index].id)));
     }
     for (const child of pending) {
-      for (const file of Files.list(user.id, { folderId: child.id })) trashFile(file);
+      for (const file of await Files.list(user.id, { folderId: child.id })) await trashFile(file);
     }
-    Folders.delete(folder.id);
+    await Folders.delete(folder.id);
     return apiOk({ deleted: 'trash' });
   });
 
@@ -483,8 +486,8 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       }),
       request.body,
     );
-    const folder = resolveFolderPath(user.id, apiPath(body.path ?? '/'));
-    const result = initUpload({
+    const folder = await resolveFolderPath(user.id, apiPath(body.path ?? '/'));
+    const result = await initUpload({
       userId: user.id,
       clientKey: body.clientKey ?? randomBase64Url(24),
       folderId: folder?.id ?? null,
@@ -518,7 +521,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
   app.get(`${API_ROOT}/uploads/:id`, async (request) => {
     const user = requireApiUser(request);
     const { id } = request.params as { id: string };
-    const status = uploadStatus(user.id, id);
+    const status = await uploadStatus(user.id, id);
     return apiOk({
       uploadId: status.uploadId,
       status: status.status,
@@ -533,8 +536,8 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
   app.post(`${API_ROOT}/uploads/:id/complete`, async (request) => {
     const user = requireApiUser(request);
     const result = await completeUpload({ userId: user.id, uploadId: (request.params as { id: string }).id });
-    const file = Files.findById(result.fileRow.id);
-    return apiOk({ file: file ? apiFile(file) : result.file });
+    const file = await Files.findById(result.fileRow.id);
+    return apiOk({ file: file ? await apiFile(file) : result.file });
   });
 
   app.delete(`${API_ROOT}/uploads/:id`, async (request) => {
@@ -546,47 +549,48 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
   app.post(`${API_ROOT}/chunks/lookup`, async (request) => {
     const user = requireApiUser(request);
     const body = parse(z.object({ checksums: z.array(z.string().regex(/^[a-f0-9]{64}$/i)).max(MAX_KEYS) }), request.body);
-    const existing = new Set(FileChunks.lookupHashes(user.id, body.checksums.map((hash) => hash.toLowerCase())));
+    const found = await FileChunks.lookupHashes(user.id, body.checksums.map((hash) => hash.toLowerCase()));
+    const existing = new Set(found);
     return apiOk({ existing: [...existing], missing: body.checksums.filter((hash) => !existing.has(hash.toLowerCase())) });
   });
 
   app.get(`${API_ROOT}/recent`, async (request) => {
     const user = requireApiUser(request);
     const { limit, offset } = offsetLimit(request.query as Record<string, unknown>);
-    const rows = Files.recent(user.id, limit + 1, offset);
+    const rows = await Files.recent(user.id, limit + 1, offset);
     const files = rows.slice(0, limit);
-    return apiOk({ files: files.map(apiFile), nextOffset: rows.length > limit ? offset + limit : null });
+    return apiOk({ files: await mapFiles(files), nextOffset: rows.length > limit ? offset + limit : null });
   });
 
   app.get(`${API_ROOT}/favorites`, async (request) => {
     const user = requireApiUser(request);
     const { limit, offset } = offsetLimit(request.query as Record<string, unknown>);
-    const rows = Files.starred(user.id, limit + 1, offset);
+    const rows = await Files.starred(user.id, limit + 1, offset);
     const files = rows.slice(0, limit);
-    return apiOk({ files: files.map(apiFile), nextOffset: rows.length > limit ? offset + limit : null });
+    return apiOk({ files: await mapFiles(files), nextOffset: rows.length > limit ? offset + limit : null });
   });
 
   app.get(`${API_ROOT}/search`, async (request) => {
     const user = requireApiUser(request);
     const params = parse(z.object({ q: z.string().min(1).max(256), limit: z.coerce.number().int().min(1).max(500).default(100) }), request.query);
-    return apiOk({ files: Files.search(user.id, params.q, params.limit).map(apiFile) });
+    return apiOk({ files: await mapFiles(await Files.search(user.id, params.q, params.limit)) });
   });
 
   app.get(`${API_ROOT}/trash`, async (request) => {
     const user = requireApiUser(request);
-    return apiOk({ files: Files.trashList(user.id).map(apiFile) });
+    return apiOk({ files: await mapFiles(await Files.trashList(user.id)) });
   });
 
   app.post(`${API_ROOT}/trash/:id/restore`, async (request) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
-    restoreFile(file);
-    return apiOk({ file: apiFile(Files.findById(file.id)!) });
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
+    await restoreFile(file);
+    return apiOk({ file: await apiFile((await Files.findById(file.id))!) });
   });
 
   app.post(`${API_ROOT}/trash/empty`, async (request) => {
     const user = requireApiUser(request);
-    const items = Files.trashList(user.id);
+    const items = await Files.trashList(user.id);
     let freedBytes = 0;
     for (const file of items) {
       await deleteFilePermanent(file);
@@ -597,7 +601,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
 
   app.post(`${API_ROOT}/files/:id/shares`, async (request, reply) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
     const body = parse(
       z.object({
         permission: z.enum(['view', 'download']).optional(),
@@ -607,7 +611,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       }),
       request.body,
     );
-    const share = Shares.create({
+    const share = await Shares.create({
       user_id: user.id,
       file_id: file.id,
       folder_id: null,
@@ -628,11 +632,11 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
   app.get(`${API_ROOT}/shares`, async (request) => {
     const user = requireApiUser(request);
     const { limit, offset } = offsetLimit(request.query as Record<string, unknown>);
-    const rows = Shares.listByUser(user.id).slice(offset, offset + limit + 1);
+    const rows = (await Shares.listByUser(user.id)).slice(offset, offset + limit + 1);
     const more = rows.length > limit;
-    return apiOk({
-      shares: rows.slice(0, limit).map((share) => {
-        const file = share.file_id ? Files.findById(share.file_id) : undefined;
+    const shares = await Promise.all(
+      rows.slice(0, limit).map(async (share) => {
+        const file = share.file_id ? await Files.findById(share.file_id) : undefined;
         return {
           token: share.token,
           file_id: share.file_id,
@@ -649,14 +653,14 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
           content_type: file?.mime ?? null,
         };
       }),
-      nextOffset: more ? offset + limit : null,
-    });
+    );
+    return apiOk({ shares, nextOffset: more ? offset + limit : null });
   });
 
   app.get(`${API_ROOT}/files/:id/shares`, async (request) => {
     const user = requireApiUser(request);
-    const file = ownFile(user.id, (request.params as { id: string }).id);
-    const shares = Shares.listByFile(user.id, file.id);
+    const file = await ownFile(user.id, (request.params as { id: string }).id);
+    const shares = await Shares.listByFile(user.id, file.id);
     return apiOk({
       shares: shares.map((share) => ({
         token: share.token,
@@ -674,9 +678,9 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
 
   app.delete(`${API_ROOT}/shares/:token`, async (request) => {
     const user = requireApiUser(request);
-    const share = Shares.findByToken((request.params as { token: string }).token);
+    const share = await Shares.findByToken((request.params as { token: string }).token);
     if (!share || share.user_id !== user.id) throw errors.notFound('المشاركة غير موجودة.');
-    Shares.revoke(share.id);
+    await Shares.revoke(share.id);
     return apiOk({});
   });
 }

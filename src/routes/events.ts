@@ -31,7 +31,7 @@ export default async function eventRoutes(app: FastifyInstance): Promise<void> {
     };
 
     // لقطة أوّلية للمهام النشطة
-    for (const job of Jobs.listByUser(user.id, ['queued', 'running'])) {
+    for (const job of await Jobs.listByUser(user.id, ['queued', 'running'])) {
       send({ type: 'job', data: toApiJob(job) });
     }
 

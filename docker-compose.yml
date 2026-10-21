@@ -1,4 +1,4 @@
-services:
+﻿services:
   tdrive:
     build: .
     image: tdrive:latest
@@ -12,16 +12,18 @@ services:
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "8080"
-      # التخزين وقاعدة البيانات داخل الحجم الدائم
+      # Ø§Ù„ØªØ®Ø²ÙŠÙ† ÙˆÙ‚Ø§Ø¹Ø¯Ø© Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª Ø¯Ø§Ø®Ù„ Ø§Ù„Ø­Ø¬Ù… Ø§Ù„Ø¯Ø§Ø¦Ù…
       LOCAL_STORAGE_DIR: /app/data/storage
       TMP_DIR: /app/data/tmp
-      DB_PATH: /app/data/tdrive.sqlite
+      DB_SCHEMA: tdrive
+      DB_SSL: "true"
       YTDLP_PATH: yt-dlp
       FFMPEG_PATH: ffmpeg
       FFPROBE_PATH: ffprobe
     volumes:
       - tdrive-data:/app/data
-    # خلف reverse proxy ارفع حدّ جسم الطلب (راجع README) — client_max_body_size >= 20MB
+    # Ø®Ù„Ù reverse proxy Ø§Ø±ÙØ¹ Ø­Ø¯Ù‘ Ø¬Ø³Ù… Ø§Ù„Ø·Ù„Ø¨ (Ø±Ø§Ø¬Ø¹ README) â€” client_max_body_size >= 20MB
 
 volumes:
   tdrive-data:
+

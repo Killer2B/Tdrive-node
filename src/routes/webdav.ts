@@ -9,7 +9,7 @@ import { authenticateApiKey } from '../services/api-keys.ts';
 import { createFolderAtPath, resolveFolderPath } from '../services/folders.ts';
 import { deleteFilePermanent, ingestLocalFile, openFileRange, trashFile } from '../services/files.ts';
 import { Files, Folders, Users, type FileRow, type FolderRow, type UserRow } from '../db/repo.ts';
-import { getDb } from '../db/db.ts';
+import { tb, withTransaction } from '../db/pg.ts';
 import { errors, isAppError } from '../lib/errors.ts';
 import { isSafeSegment, normalizeVirtualPath, sanitizeFileName } from '../lib/paths.ts';
 import { loadConfig } from '../config/env.ts';
@@ -74,12 +74,12 @@ function pathSegments(pathname: string): { parentPath: string; name: string } {
   return { parentPath: parts.length ? `/${parts.join('/')}` : '/', name };
 }
 
-function resolveResource(userId: string, pathname: string): DavResource {
+async function resolveResource(userId: string, pathname: string): Promise<DavResource> {
   if (pathname === '/') return { path: pathname };
   const { parentPath, name } = pathSegments(pathname);
-  const parent = resolveFolderPath(userId, parentPath);
-  const folder = Folders.findByParentName(userId, parent?.id ?? null, name);
-  const file = Files.findByFolderAndName(userId, parent?.id ?? null, name);
+  const parent = await resolveFolderPath(userId, parentPath);
+  const folder = await Folders.findByParentName(userId, parent?.id ?? null, name);
+  const file = await Files.findByFolderAndName(userId, parent?.id ?? null, name);
   if (folder) return { path: pathname, folder };
   if (file) return { path: pathname, file };
   throw errors.notFound('WebDAV resource not found.');
@@ -147,13 +147,13 @@ async function writeUpload(
   overwrite: boolean,
 ): Promise<{ file: FileRow; replaced: boolean }> {
   const { parentPath, name } = pathSegments(pathname);
-  const parent = resolveFolderPath(user.id, parentPath);
+  const parent = await resolveFolderPath(user.id, parentPath);
   const safeName = sanitizeFileName(name);
   if (safeName !== name) throw errors.badRequest('The destination filename contains unsupported characters.');
-  if (Folders.findByParentName(user.id, parent?.id ?? null, name)) {
+  if (await Folders.findByParentName(user.id, parent?.id ?? null, name)) {
     throw errors.conflict('A collection already exists at this destination.');
   }
-  const existing = Files.findByFolderAndName(user.id, parent?.id ?? null, name);
+  const existing = await Files.findByFolderAndName(user.id, parent?.id ?? null, name);
   if (existing && !overwrite) throw errors.conflict('Destination exists and Overwrite is false.');
   const cfg = loadConfig();
   await mkdir(cfg.storage.tmpDir, { recursive: true });
@@ -171,10 +171,10 @@ async function writeUpload(
       computeSha: true,
     });
     if (existing) {
-      Files.update(file.id, { name });
+      await Files.update(file.id, { name });
       await deleteFilePermanent(existing);
     }
-    Activity.record({
+    await Activity.record({
       userId: user.id,
       action: 'upload',
       targetType: 'file',
@@ -183,7 +183,7 @@ async function writeUpload(
       ip: undefined,
       meta: { source: 'webdav', sizeBytes: file.size },
     });
-    return { file: Files.findById(file.id) ?? file, replaced: !!existing };
+    return { file: (await Files.findById(file.id)) ?? file, replaced: !!existing };
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -192,20 +192,20 @@ async function writeUpload(
 async function deleteResource(userId: string, resource: DavResource, permanent: boolean): Promise<void> {
   if (resource.file) {
     if (permanent) await deleteFilePermanent(resource.file);
-    else trashFile(resource.file);
+    else await trashFile(resource.file);
     return;
   }
   if (!resource.folder) return;
   const queue = [resource.folder];
   for (let index = 0; index < queue.length; index++) {
     const current = queue[index];
-    queue.push(...Folders.listChildren(userId, current.id));
-    for (const file of Files.list(userId, { folderId: current.id, limit: 2000 })) {
+    queue.push(...(await Folders.listChildren(userId, current.id)));
+    for (const file of await Files.list(userId, { folderId: current.id, limit: 2000 })) {
       if (permanent) await deleteFilePermanent(file);
-      else trashFile(file);
+      else await trashFile(file);
     }
   }
-  Folders.delete(resource.folder.id);
+  await Folders.delete(resource.folder.id);
 }
 
 async function copyFile(
@@ -247,9 +247,9 @@ async function renameOrMove(
   if (source.folder && pathsOverlap(source.folder.path, destination)) {
     throw errors.badRequest('A folder cannot be moved inside itself.');
   }
-  const target: DavResource | null = (() => {
+  const target: DavResource | null = await (async () => {
     try {
-      return resolveResource(userId, destination);
+      return await resolveResource(userId, destination);
     } catch (error) {
       if (isAppError(error) && error.statusCode === 404) return null;
       throw error;
@@ -259,39 +259,36 @@ async function renameOrMove(
   if (target && target.file?.id === source.file?.id) return;
   if (target) await deleteResource(userId, target, true);
   const { parentPath, name } = pathSegments(destination);
-  const parent = resolveFolderPath(userId, parentPath);
+  const parent = await resolveFolderPath(userId, parentPath);
   const cleanName = sanitizeFileName(name);
   if (cleanName !== name) throw errors.badRequest('The destination name is invalid.');
   if (source.file) {
-    Files.update(source.file.id, { folder_id: parent?.id ?? null, name: cleanName });
+    await Files.update(source.file.id, { folder_id: parent?.id ?? null, name: cleanName });
     return;
   }
   if (!source.folder) throw errors.notFound('WebDAV resource not found.');
   const newPath = normalizeVirtualPath(`${parent?.path ?? ''}/${cleanName}`);
-  const db = getDb();
   const folder = source.folder;
-  const tx = db.transaction(() => {
-    Folders.move(folder.id, parent?.id ?? null, cleanName, newPath);
-    db.prepare(
-      `UPDATE folders SET path = @new || substr(path, @oldLen + 1), updated_at = @ts
-       WHERE user_id = @uid AND path LIKE @like ESCAPE '\\'`,
-    ).run({
-      new: newPath,
-      oldLen: folder.path.length,
-      ts: Date.now(),
-      uid: userId,
-      like: `${folder.path.replace(/[%_]/g, (match) => `\\${match}`)}/%`,
-    });
+  const prefix = `${folder.path}/`;
+  await withTransaction(async (client) => {
+    await client.query(
+      `UPDATE ${tb('folders')} SET parent_id = $1, name = $2, path = $3, updated_at = $4 WHERE id = $5`,
+      [parent?.id ?? null, cleanName, newPath, Date.now(), folder.id],
+    );
+    await client.query(
+      `UPDATE ${tb('folders')} SET path = $1 || substr(path, $2 + 1), updated_at = $3
+       WHERE user_id = $4 AND starts_with(path, $5) AND path <> $5`,
+      [newPath, folder.path.length, Date.now(), userId, prefix],
+    );
   });
-  tx();
 }
 
 async function copyDirectory(user: UserRow, source: FolderRow, destination: string): Promise<void> {
-  const created = createFolderAtPath(user.id, pathSegments(destination).parentPath, pathSegments(destination).name);
-  for (const file of Files.list(user.id, { folderId: source.id, limit: 2000 })) {
+  const created = await createFolderAtPath(user.id, pathSegments(destination).parentPath, pathSegments(destination).name);
+  for (const file of await Files.list(user.id, { folderId: source.id, limit: 2000 })) {
     await copyFile(user, file, `${created.path}/${file.name}`, false);
   }
-  for (const child of Folders.listChildren(user.id, source.id)) {
+  for (const child of await Folders.listChildren(user.id, source.id)) {
     await copyDirectory(user, child, `${created.path}/${child.name}`);
   }
 }
@@ -311,8 +308,8 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
   app.addHook('preHandler', async (request, reply) => {
     if (request.method === 'OPTIONS') return;
     const key = requestApiKey(request);
-    const authenticated = key ? authenticateApiKey(key) : null;
-    const user = authenticated ? Users.findById(authenticated.userId) : undefined;
+    const authenticated = key ? await authenticateApiKey(key) : null;
+    const user = authenticated ? await Users.findById(authenticated.userId) : undefined;
     if (!user) {
       reply.header('WWW-Authenticate', 'Basic realm="Tdrive WebDAV", Bearer');
       throw errors.unauthorized('Authenticate WebDAV with a Tdrive API key.');
@@ -330,14 +327,14 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
       const targetPath = decodeDavPath(request);
       const depth = request.headers.depth ?? '1';
       if (depth !== '0' && depth !== '1') throw errors.badRequest('WebDAV Depth must be 0 or 1.');
-      const resource = resolveResource(user.id, targetPath);
+      const resource = await resolveResource(user.id, targetPath);
       let responses = propResponse(targetPath, resource.file, resource.folder);
       if (depth === '1' && !resource.file) {
         const folderId = resource.folder?.id ?? null;
-        for (const folder of Folders.listChildren(user.id, folderId)) {
+        for (const folder of await Folders.listChildren(user.id, folderId)) {
           responses += propResponse(folder.path, undefined, folder);
         }
-        for (const file of Files.list(user.id, { folderId, limit: 2000 })) {
+        for (const file of await Files.list(user.id, { folderId, limit: 2000 })) {
           responses += propResponse(`${targetPath === '/' ? '' : targetPath}/${file.name}`, file);
         }
       }
@@ -349,16 +346,16 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
       const user = requireDavUser(request);
       const targetPath = decodeDavPath(request);
       const { parentPath, name } = pathSegments(targetPath);
-      const parent = resolveFolderPath(user.id, parentPath);
-      if (Files.findByFolderAndName(user.id, parent?.id ?? null, name)) {
+      const parent = await resolveFolderPath(user.id, parentPath);
+      if (await Files.findByFolderAndName(user.id, parent?.id ?? null, name)) {
         throw errors.conflict('A file already exists at this destination.');
       }
-      const folder = createFolderAtPath(user.id, parentPath, name);
+      const folder = await createFolderAtPath(user.id, parentPath, name);
       return reply.code(201).header('Location', href(folder.path, true)).send();
     },
     GET: async (request, reply) => {
       const user = requireDavUser(request);
-      const resource = resolveResource(user.id, decodeDavPath(request));
+      const resource = await resolveResource(user.id, decodeDavPath(request));
       if (resource.folder) return reply.code(405).header('Allow', 'OPTIONS, PROPFIND, MKCOL, GET, HEAD, DELETE, MOVE, COPY').send();
       if (!resource.file) throw errors.notFound('WebDAV resource not found.');
       return serveFileRange(request, reply, resource.file, { attachment: true });
@@ -373,14 +370,14 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
     },
     DELETE: async (request, reply) => {
       const user = requireDavUser(request);
-      const resource = resolveResource(user.id, decodeDavPath(request));
+      const resource = await resolveResource(user.id, decodeDavPath(request));
       if (!resource.file && !resource.folder) throw errors.forbidden('The WebDAV root cannot be deleted.');
       await deleteResource(user.id, resource, false);
       return reply.code(204).send();
     },
     MOVE: async (request, reply) => {
       const user = requireDavUser(request);
-      const source = resolveResource(user.id, decodeDavPath(request));
+      const source = await resolveResource(user.id, decodeDavPath(request));
       const dest = destinationPath(request, singleHeader(request.headers.destination));
       if (source.path === dest) return reply.code(204).send();
       if (source.folder && pathsOverlap(source.folder.path, dest)) {
@@ -392,7 +389,7 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
     },
     COPY: async (request, reply) => {
       const user = requireDavUser(request);
-      const source = resolveResource(user.id, decodeDavPath(request));
+      const source = await resolveResource(user.id, decodeDavPath(request));
       const dest = destinationPath(request, singleHeader(request.headers.destination));
       if (source.path === dest) return reply.code(204).send();
       if (source.folder && pathsOverlap(source.folder.path, dest)) {
@@ -400,10 +397,10 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
       }
       const overwrite = singleHeader(request.headers.overwrite)?.toUpperCase() !== 'F';
       const { parentPath } = pathSegments(dest);
-      resolveFolderPath(user.id, parentPath);
-      const existing = (() => {
+      await resolveFolderPath(user.id, parentPath);
+      const existing = await (async () => {
         try {
-          return resolveResource(user.id, dest);
+          return await resolveResource(user.id, dest);
         } catch (error) {
           if (isAppError(error) && error.statusCode === 404) return null;
           throw error;
