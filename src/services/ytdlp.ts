@@ -446,7 +446,7 @@ export async function download(
   const outDir = path.resolve(opts.outDir);
 
   /** يبني وسائط المحاولة: الكوكيز (أو بلا) + وسائط بديلة لعملاء YouTube. */
-  const buildArgs = (withCookies: boolean, extra: string[]): string[] => {
+  const buildArgs = (withCookies: boolean, extra: string[], formatOverride?: string): string[] => {
     const outTemplate = path.join(outDir, '%(id)s.%(ext)s');
     const args = [
       '--no-playlist',
@@ -462,7 +462,7 @@ export async function download(
       '--concurrent-fragments',
       '4',
       '-f',
-      fmt,
+      formatOverride ?? fmt,
       '-o',
       outTemplate,
       '--progress-template',
@@ -628,25 +628,37 @@ export async function download(
     });
   });
 
-  try {
-    return await runOnce(buildArgs(true, []));
-  } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    // YouTube من عناوين مراكز البيانات قد يرفض روابط التشغيل (403) أو يطلب تحقّقًا.
-    // نعيد بعميل آخر بلا كوكيز (المسار المفضّل عند غياب/انتهاء الكوكيز).
-    if (opts.signal?.aborted || !isYouTubeUrl(url) || !isAuthOrFormatFailure(message)) throw e;
-    getLogger().warn({ err: message }, 'فشل تحميل YouTube — إعادة المحاولة بعميل بديل بلا كوكيز');
-    const hadCookies = usableFile(cookiesFilePath());
+  const bestFmt = formatExpr(hasFfmpeg, 'best');
+  const attempts: Array<{ cookies: boolean; extra: string[]; format?: string }> = [
+    { cookies: true, extra: [] },
+    // بلا كوكيز وبعملاء لا تشترط PO token
+    { cookies: false, extra: YOUTUBE_FALLBACK_ARGS },
+  ];
+  // قد تكون الصيغة المطلوبة غير موجودة في العميل البديل (مثل itag 18) ⇒ أفضل جودة
+  if (fmt !== bestFmt) attempts.push({ cookies: false, extra: YOUTUBE_FALLBACK_ARGS, format: bestFmt });
+
+  let lastError: Error | null = null;
+  for (let index = 0; index < attempts.length; index++) {
+    const attempt = attempts[index];
+    if (index > 0) {
+      const canRetry = isYouTubeUrl(url) && isAuthOrFormatFailure(lastError?.message ?? '');
+      if (opts.signal?.aborted || !canRetry) throw lastError ?? new Error('فشل التحميل.');
+    }
     try {
-      return await runOnce(buildArgs(false, YOUTUBE_FALLBACK_ARGS));
-    } catch (fallbackError) {
-      const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-      // إن كانت الكوكيز موجودة وأخطأ العميل البديل، نجرّبها معه (قد تكون لازمة للمحتوى المقيّد)
-      if (opts.signal?.aborted || !hadCookies || !isAuthOrFormatFailure(fallbackMessage)) throw fallbackError;
-      getLogger().warn({ err: fallbackMessage }, 'تعذّر البديل بلا كوكيز — إعادة المحاولة بالكوكيز');
-      return await runOnce(buildArgs(true, YOUTUBE_FALLBACK_ARGS));
+      return await runOnce(buildArgs(attempt.cookies, attempt.extra, attempt.format));
+    } catch (e) {
+      if (opts.signal?.aborted) throw e;
+      lastError = e instanceof Error ? e : new Error(String(e));
+      if (!isYouTubeUrl(url) || !isAuthOrFormatFailure(lastError.message)) throw lastError;
+      if (index < attempts.length - 1) {
+        getLogger().warn(
+          { attempt: index + 1, err: lastError.message },
+          'فشل تحميل YouTube — إعادة المحاولة ببديل بلا كوكيز',
+        );
+      }
     }
   }
+  throw lastError ?? new Error('فشل التحميل.');
 }
 
 export async function version(): Promise<string | null> {
