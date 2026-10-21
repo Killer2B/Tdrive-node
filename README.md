@@ -44,7 +44,9 @@
   قابلة للإنشاء والإلغاء من الإعدادات. يدعم WebDAV في `/dav/` المصادقة بمفتاح API.
 - **Supabase (Postgres)**: قاعدة البيانات الوحيدة للتشغيل. المخطّط `tdrive` (14 جدولًا) وسياسات RLS
   مُنشأة ومُطبَّقة عبر **Supabase MCP**، والتطبيق يتّصل بها عبر `SUPABASE_DB_URL` (كل الاستعلامات
-  غير متزامنة). التفاصيل في [`supabase/README.md`](./supabase/README.md).
+  غير متزامنة). استخدم رابط **Session pooler** (`aws-0-<region>.pooler.supabase.com`) لأن الاتصال
+  المباشر `db.<ref>.supabase.co` صار IPv6-only في المشاريع الحديثة. التفاصيل في
+  [`supabase/README.md`](./supabase/README.md).
 - **نسخ احتياطيّ دوريّ** كل 18 ساعة (قابل للضبط) لقاعدة **Postgres** و**قاعدة MySQL خارجية** إلى
   نظام التخزين الداخليّ (مضغوطة) مع سياسة احتفاظ.
 
@@ -165,16 +167,17 @@ docker compose up -d --build
 `yt-dlp`/`ffmpeg` كثنائيّات arm64 داخل `./bin` تلقائيًّا.
 
 1. **ارفع المشروع** إلى الخادم (Git أو مدير الملفّات). في اللوحة اختر **Node.js** و**إصدار Node 24**
-   (أو 22.6+). مرحلة التثبيت تنفّذ `npm install`. ملاحظة: اللوحة تحظر سكربتات بناء الوحدات الأصلية
-   (`better-sqlite3`/`argon2`)؛ لا مشكلة — التطبيق يسقط تلقائيًّا إلى `node:sqlite` و`scrypt` المدمجين.
+   (أو 22.6+). مرحلة التثبيت تنفّذ `npm install`. ملاحظة: اللوحة قد تحظر بناء `argon2` الأصليّ؛
+   لا مشكلة — التطبيق يسقط تلقائيًّا إلى `scrypt` المدمج. لا يوجد أيّ تخزين SQLite.
 2. **ملف التشغيل (MAIN_FILE):** اضبط متغيّر `MAIN_FILE` في اللوحة على:
    ```
    start.js
    ```
    يجب أن ينتهي بـ `.js` حتى تشغّله اللوحة بـ `node` (لو كان بامتداد آخر تستخدم اللوحة `ts-node` ونحن
    لا نريده). `start.js` يهيّئ `./bin/yt-dlp` و`./bin/ffmpeg` (idempotent) ثم يشغّل الخادم من TypeScript
-   عبر تجريد الأنواع في Node مع إضافة أعلام `node:sqlite`/strip عند اللزوم تلقائيًّا. اترك `NODE_ARGS` فارغًا.
-3. **الإعدادات:** أنشئ ملف `.env` في جذر الخادم (انسخ من `.env.host.example`) واملأ: `SESSION_SECRET`،
+   عبر تجريد الأنواع في Node (مع علم strip عند اللزوم). اترك `NODE_ARGS` فارغًا.
+3. **الإعدادات:** أنشئ ملف `.env` في جذر الخادم (انسخ من `.env.host.example`) واملأ: `SUPABASE_DB_URL`
+   (سلسلة **Session pooler** من لوحة Supabase — الاتصال المباشر قد يكون IPv6 فقط)، `SESSION_SECRET`،
    `OWNER_PASSWORD`، `TG_BOT_TOKEN`، `TG_CHAT_ID`، و`PUBLIC_URL=https://tdrive.cc.cd`. اترك `PORT`
    فارغًا ليُؤخذ من `SERVER_PORT`، أو اضبطه على منفذ اللوحة (**24600**). `HOST=0.0.0.0`.
 4. **الدومين:** اربط `tdrive.cc.cd` بمنفذ الخادم عبر النطاق الفرعيّ/الـ Proxy في اللوحة (HTTPS).
@@ -200,10 +203,12 @@ docker compose up -d --build
 ---
 
 ## النسخ الاحتياطيّ لقاعدة البيانات (كل 18 ساعة)
-> **قرار معماريّ (مدوّن كافتراض):** قاعدة التطبيق التشغيليّة هي **SQLite** (كما نصّت المعمارية
-> المطلوبة: `better-sqlite3` + WAL — الأنسب لسحابة مالك واحد مضمّنة). رابط **MySQL** المُعطى
-> في المهمّة يُعامَل كقاعدة خارجية **تُنسَخ احتياطيًّا** إلى نظام التخزين الداخليّ، لا كقاعدة
-> أساسية. هذا يوفّق بين «الالتزام بمعمارية SQLite» و«أنشئ نسخة من قاعدة البيانات كل 18 ساعة».
+> قاعدة التطبيق التشغيليّة الوحيدة هي **Postgres (Supabase)** في المخطّط `tdrive`. لا SQLite ولا
+> تخزين محلّي. يعمل الجدول الداخليّ على أخذ نسخة من **Postgres** (ومِن **MySQL** الخارجية إن
+> ضُبطت) كل 18 ساعة.
+>
+> **شغّل نسخة واحدة فقط على القاعدة نفسها:** كاش القطع محليّ على القرص، لذا تشغيل نسختين
+> (مثلًا محليًّا والإنتاج معًا) يجعل إحداهما تفشل في رفع قطع أنشأتها الأخرى.
 
 التفعيل في `.env`:
 ```ini
@@ -214,9 +219,9 @@ MYSQL_BACKUP_URL=mysql://USER:URL_ENCODED_PASSWORD@HOST:3306/DBNAME
 BACKUP_RETENTION=14
 BACKUP_PREFIX=_system/backups
 ```
-- عند التفعيل يعمل المجدوِل الداخليّ: ينسخ **SQLite** (عبر backup API) و**MySQL** (تفريغ مخطّط+بيانات
-  على دفعات لحدّ الذاكرة)، يضغطهما `.gz`، ويحفظهما عبر محوّل التخزين تحت `BACKUP_PREFIX`
-  (`sqlite/` و`mysql/`)، مع حذف الأقدم وفق `BACKUP_RETENTION`.
+- عند التفعيل يعمل المجدوِل الداخليّ: ينسخ **Postgres** (تفريغ مخطّط+بيانات) و**MySQL** (تفريغ
+  مخطّط+بيانات)، يضغطهما `.gz`، ويحفظهما عبر محوّل التخزين تحت `BACKUP_PREFIX`
+  (`postgres/` و`mysql/`)، مع حذف الأقدم وفق `BACKUP_RETENTION`.
 - لتشغيل نسخة فورًا: `npm run backup:now`.
 - الوقت الأخير محفوظ في جدول `kv`، فلا يتكرّر النسخ عند إعادة التشغيل، ويُستأنف الجدول بدقّة.
 
@@ -240,8 +245,8 @@ npm run build         # ترجمة الإنتاج
 - `backoff` التراجع الأسّيّ وحدوده.
 - `bytes`, `hash`, `sigv4` (متجه AWS الرسميّ get-vanilla), و`storage-local` (تخزين القرص فعليًّا).
 
-> اختبارات التكامل (رفع مجزّأ/استئناف، تنزيل مباشر، بثّ Range) تتطلّب تثبيت الاعتماديات
-> (better-sqlite3/fastify)؛ راجع `tests/` و`SMOKE.md`.
+> اختبارات الوحدة لا تحتاج قاعدة بيانات. اختبارات التكامل تحتاج قاعدة Postgres اختبارية معزولة
+> (`TEST_DATABASE_URL`) ولا تُشغَّل على قاعدة الإنتاج؛ راجع `tests/` و`SMOKE.md`.
 
 ---
 
@@ -253,7 +258,7 @@ tdrive/
 │   ├── server.ts           # مصنع Fastify + المعالجة المركزية للأخطاء
 │   ├── config/env.ts       # إعدادات مُتحقّقة بـ zod (+ مُحمِّل .env)
 │   ├── lib/                # ssrf, paths, ranges, chunking, hash, backoff, bytes, errors, spawn, logger
-│   ├── db/                 # better-sqlite3 + الهجرات + repositories
+│   ├── db/                 # pg Pool (Supabase) + التحقّق من المخطّط + repositories
 │   ├── storage/            # المحوّل: local + s3 (SigV4)
 │   ├── services/           # auth, uploads, files, downloads, ytdlp, ffmpeg, queue, progress(SSE), backup, scheduler
 │   ├── routes/             # auth, files, folders, uploads, downloads, events, misc + static

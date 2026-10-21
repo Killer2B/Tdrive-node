@@ -30,6 +30,7 @@ COPY package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=web /app/web/dist ./web/dist
+COPY DEVELOPER_API.md ./
 RUN mkdir -p /app/data && useradd -r -u 10001 -m -d /home/tdrive tdrive && chown -R tdrive:tdrive /app
 USER tdrive
 EXPOSE 8080

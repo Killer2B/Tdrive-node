@@ -1,4 +1,4 @@
-﻿services:
+services:
   tdrive:
     build: .
     image: tdrive:latest
@@ -12,7 +12,7 @@
       NODE_ENV: production
       HOST: 0.0.0.0
       PORT: "8080"
-      # Ø§Ù„ØªØ®Ø²ÙŠÙ† ÙˆÙ‚Ø§Ø¹Ø¯Ø© Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª Ø¯Ø§Ø®Ù„ Ø§Ù„Ø­Ø¬Ù… Ø§Ù„Ø¯Ø§Ø¦Ù…
+      # التخزين وقاعدة البيانات داخل الحجم الدائم
       LOCAL_STORAGE_DIR: /app/data/storage
       TMP_DIR: /app/data/tmp
       DB_SCHEMA: tdrive
@@ -22,7 +22,7 @@
       FFPROBE_PATH: ffprobe
     volumes:
       - tdrive-data:/app/data
-    # Ø®Ù„Ù reverse proxy Ø§Ø±ÙØ¹ Ø­Ø¯Ù‘ Ø¬Ø³Ù… Ø§Ù„Ø·Ù„Ø¨ (Ø±Ø§Ø¬Ø¹ README) â€” client_max_body_size >= 20MB
+    # خلف reverse proxy ارفع حدّ جسم الطلب (راجع README) — client_max_body_size >= 20MB
 
 volumes:
   tdrive-data:
