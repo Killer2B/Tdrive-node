@@ -180,11 +180,14 @@ function containsPath(parent: string, child: string): boolean {
   return child === parent || child.startsWith(`${parent}/`);
 }
 
-function conflictingLocks(pathname: string): DavLock[] {
+function conflictingLocks(userId: string, pathname: string, includeDescendants = false): DavLock[] {
   pruneLocks();
   const target = lockPath(pathname);
   return [...locks.values()].filter((lock) =>
-    lock.depth === 'infinity' ? containsPath(lock.path, target) : lock.path === target,
+    lock.user === userId && (
+      (lock.depth === 'infinity' ? containsPath(lock.path, target) : lock.path === target)
+      || (includeDescendants && containsPath(target, lock.path))
+    ),
   );
 }
 
@@ -207,8 +210,8 @@ function lockedError(): Error {
 }
 
 /** يرفض الكتابة على مسار مقفل ما لم يُقدَّم رمز القفل في If/Lock-Token. */
-function assertUnlocked(request: FastifyRequest, pathname: string): void {
-  const conflicts = conflictingLocks(pathname);
+function assertUnlocked(request: FastifyRequest, pathname: string, includeDescendants = false): void {
+  const conflicts = conflictingLocks(requireDavUser(request).id, pathname, includeDescendants);
   if (conflicts.length === 0) return;
   const provided = submittedLockTokens(request);
   if (conflicts.some((lock) => !provided.includes(lock.token.replace(/^opaquelocktoken:/i, '')))) {
@@ -217,10 +220,10 @@ function assertUnlocked(request: FastifyRequest, pathname: string): void {
 }
 
 /** يحذف أقفال المسار وكل ما تحته (بعد DELETE/MOVE). */
-function dropLocksUnder(pathname: string): void {
+function dropLocksUnder(userId: string, pathname: string): void {
   const target = lockPath(pathname);
   for (const [key, lock] of locks) {
-    if (lock.path === target || containsPath(target, lock.path)) locks.delete(key);
+    if (lock.user === userId && containsPath(target, lock.path)) locks.delete(key);
   }
 }
 
@@ -323,10 +326,10 @@ async function writeUpload(
 }
 
 async function deleteResource(userId: string, resource: DavResource, permanent: boolean): Promise<void> {
-  dropLocksUnder(resource.path);
   if (resource.file) {
     if (permanent) await deleteFilePermanent(resource.file);
     else await trashFile(resource.file);
+    dropLocksUnder(userId, resource.path);
     return;
   }
   if (!resource.folder) return;
@@ -334,12 +337,18 @@ async function deleteResource(userId: string, resource: DavResource, permanent: 
   for (let index = 0; index < queue.length; index++) {
     const current = queue[index];
     queue.push(...(await Folders.listChildren(userId, current.id)));
-    for (const file of await Files.list(userId, { folderId: current.id, limit: 10_000 })) {
-      if (permanent) await deleteFilePermanent(file);
-      else await trashFile(file);
+    // Deletion removes rows from the active listing; drain the first page without skipping files.
+    for (;;) {
+      const files = await Files.list(userId, { folderId: current.id, limit: 2000 });
+      if (files.length === 0) break;
+      for (const file of files) {
+        if (permanent) await deleteFilePermanent(file);
+        else await trashFile(file);
+      }
     }
   }
   await Folders.delete(resource.folder.id);
+  dropLocksUnder(userId, resource.path);
 }
 
 async function copyFile(
@@ -570,7 +579,7 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
       const user = requireDavUser(request);
       const resource = await resolveResource(user.id, decodeDavPath(request));
       if (!resource.file && !resource.folder) throw errors.forbidden('The WebDAV root cannot be deleted.');
-      assertUnlocked(request, resource.path);
+      assertUnlocked(request, resource.path, !!resource.folder);
       await deleteResource(user.id, resource, false);
       return reply.code(204).send();
     },
@@ -586,7 +595,7 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
       assertUnlocked(request, dest);
       const overwrite = singleHeader(request.headers.overwrite)?.toUpperCase() !== 'F';
       const result = await renameOrMove(user.id, source, dest, overwrite);
-      dropLocksUnder(source.path);
+      dropLocksUnder(user.id, source.path);
       return reply
         .code(result.replaced ? 204 : 201)
         .header('Location', href(dest, !!source.folder))
@@ -631,7 +640,7 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
         else throw error;
       }
       const depth = (singleHeader(request.headers.depth) ?? 'infinity').toLowerCase() === '0' ? '0' : 'infinity';
-      const conflicts = conflictingLocks(targetPath);
+      const conflicts = conflictingLocks(user.id, targetPath, depth === 'infinity');
       const provided = submittedLockTokens(request);
       const held = conflicts.find((lock) => !provided.includes(lock.token.replace(/^opaquelocktoken:/i, '')));
       if (held) throw lockedError();
