@@ -21,7 +21,7 @@ RUN npm run build && npm prune --omit=dev
 FROM node:20-bookworm-slim AS runtime
 ENV NODE_ENV=production
 # ffmpeg للدمج/الصور المصغّرة + yt-dlp للتحميل من المواقع + python3 لتشغيل yt-dlp
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3 ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
     && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp \
     && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
