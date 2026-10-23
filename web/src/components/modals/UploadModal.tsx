@@ -6,6 +6,7 @@ interface UploadModalProps {
   isOpen: boolean;
   onClose: () => void;
   folderId: string | null;
+  folderName: string;
   onUploaded: () => void;
   onToast: (title: string, message?: string, type?: ToastMessage['type']) => void;
 }
@@ -27,7 +28,7 @@ function fmtDuration(sec?: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`;
 }
 
-export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folderId, onUploaded, onToast }) => {
+export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folderId, folderName, onUploaded, onToast }) => {
   const [activeTab, setActiveTab] = useState<'browse' | 'remote'>('browse');
   const [isDragging, setIsDragging] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
@@ -127,6 +128,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
             <div>
               <h3 className="text-lg font-semibold text-on-surface">إضافة ملفّات</h3>
               <p className="font-mono text-xs text-outline">رفع مجزّأ قابل للاستئناف · أو تحميل من رابط</p>
+              <p className="font-mono text-xs text-primary mt-1 break-all" dir="ltr">Destination: {folderName}</p>
             </div>
           </div>
           <button onClick={onClose} className="p-1 rounded-lg hover:bg-surface-container-high text-outline hover:text-on-surface transition-colors">

@@ -54,6 +54,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     { label: 'Security & Audit Fabric', icon: 'shield', view: 'security-access' },
     { label: 'Recent & Starred Enclaves', icon: 'star', view: 'recent-starred' },
     { label: 'Recovery & Trash Shredder', icon: 'delete_outline', view: 'recovery-trash' },
+    { label: 'Workspace Settings & API Keys', icon: 'settings', view: 'workspace-settings' },
   ];
 
   return (
@@ -119,7 +120,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                   key={file.id}
                   onClick={() => {
                     onSelectFile(file);
-                    onChangeView('all-files');
                     onClose();
                   }}
                   className="w-full flex items-center justify-between p-2.5 rounded-lg hover:bg-surface-container text-left transition-colors text-xs group"

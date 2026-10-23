@@ -96,6 +96,14 @@ Authorization: Basic base64(any:tdk_…)           # an API key as the password
 
 Any file type syncs unchanged — notes, images, e-books, bookmarks exports, highlights, and large archives — with Unicode/Arabic names and nested folders. Point your sync client at `https://<host>/dav/` (or a subfolder such as `/dav/Notes`).
 
+### Windows File Explorer
+
+Use **Map network drive** with the HTTPS WebDAV UNC path, for example `\\tdrive.cc.cd@SSL\DavWWWRoot\dav`. Select **Connect using different credentials** and enter your Tdrive username and password, or any username with an API key as the password. Alternatively, use **Add a network location** with `https://tdrive.cc.cd/dav/`. The Windows **WebClient** service must be running. This is WebDAV over HTTPS, not an SMB share; `\\tdrive.cc.cd\dav` is not equivalent.
+
+The server answers `OPTIONS /` and `PROPFIND /` discovery probes as well as `/dav/`. Authenticated `GET` on a collection returns a directory listing, and `HEAD` succeeds instead of reporting a missing resource.
+
+When deploying browser changes, rebuild both projects: run `npm run build` in the repository root, then `npm --prefix web run build`. Set the host's `PUBLIC_URL` to its actual HTTPS URL (for example `https://tdrive.cc.cd`), not localhost, so browser writes pass the Origin check behind a reverse proxy. Restart the service after replacing the server and frontend builds. Changing the local `.env` does not update the host environment automatically.
+
 ## Compatibility notes
 
 This Node application currently supports the routes listed above. Archived file versions, content revisions/delta uploads, content-defined chunking, and per-key quota/rate-limit settings are not implemented yet; the API index reports the versioning and CDC capabilities as disabled. Unlike the reference API, folder deletion removes the folder tree after moving its files to trash.

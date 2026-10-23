@@ -51,6 +51,16 @@ export default function App() {
   const [shareRevision, setShareRevision] = useState(0);
   const [filesLoading, setFilesLoading] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
+  const [folderPath, setFolderPath] = useState<api.ApiFolder[]>([]);
+  const [childFolders, setChildFolders] = useState<api.ApiFolder[]>([]);
+  const [foldersLoading, setFoldersLoading] = useState(false);
+  const [foldersError, setFoldersError] = useState<string | null>(null);
+  const [folderRevision, setFolderRevision] = useState(0);
+  const [fileSelectionRevision, setFileSelectionRevision] = useState(0);
+  const folderPathsRef = useRef(new Map<string, api.ApiFolder[]>());
+  const folderNavigationRef = useRef(0);
+  const currentFolder = folderPath.at(-1);
+  const currentFolderId = currentFolder?.id ?? null;
 
   const [selectedFile, setSelectedFile] = useState<FileItem | null>(null);
   const [storageUsedTB, setStorageUsedTB] = useState<number>(0);
@@ -161,6 +171,25 @@ export default function App() {
     return () => window.removeEventListener('tdrive:unauthorized', expireSession);
   }, []);
 
+  useEffect(() => {
+    if (authState !== 'in') return;
+    let active = true;
+    setFoldersLoading(true);
+    setFoldersError(null);
+    setChildFolders([]);
+    api.folders.list(currentFolderId)
+      .then(({ folders }) => {
+        if (!active) return;
+        setChildFolders(folders);
+        for (const folder of folders) folderPathsRef.current.set(folder.id, [...folderPath, folder]);
+      })
+      .catch((error: unknown) => {
+        if (active) setFoldersError(error instanceof Error ? error.message : 'Unable to load folders.');
+      })
+      .finally(() => { if (active) setFoldersLoading(false); });
+    return () => { active = false; };
+  }, [authState, folderPath, currentFolderId, folderRevision]);
+
   // بعد الدخول: حمّل الملفّات والمهام واشترك في SSE
   useEffect(() => {
     if (authState !== 'in') return;
@@ -188,6 +217,53 @@ export default function App() {
     });
     return disconnect;
   }, [authState, reloadFiles, reloadWorkspace, refreshTransfers, addToast]);
+
+  const navigateFolder = (path: api.ApiFolder[]) => {
+    folderNavigationRef.current++;
+    setFolderPath(path);
+    setSelectedFile(null);
+    setCurrentView('all-files');
+  };
+
+  const handleCreateFolder = async (name: string) => {
+    const { folder } = await api.folders.create(name, currentFolderId);
+    folderPathsRef.current.set(folder.id, [...folderPath, folder]);
+    setFolderRevision((revision) => revision + 1);
+    addToast('Folder created', folder.name);
+  };
+
+  const openFileLocation = async (file: FileItem) => {
+    const navigation = ++folderNavigationRef.current;
+    try {
+      let path = file.parentId ? folderPathsRef.current.get(file.parentId) : [];
+      if (!path) {
+        // The folders API lists children only; resolve uncached ancestors from the root.
+        const queue: api.ApiFolder[][] = [[]];
+        const visited = new Set<string>();
+        while (queue.length && !path) {
+          const parentPath = queue.shift()!;
+          const { folders } = await api.folders.list(parentPath.at(-1)?.id ?? null);
+          if (navigation !== folderNavigationRef.current) return;
+          for (const folder of folders) {
+            if (visited.has(folder.id)) continue;
+            visited.add(folder.id);
+            const nextPath = [...parentPath, folder];
+            folderPathsRef.current.set(folder.id, nextPath);
+            if (folder.id === file.parentId) path = nextPath;
+            queue.push(nextPath);
+          }
+        }
+        if (!path) throw new Error('The containing folder could not be found. Refresh files and try again.');
+      }
+      if (navigation !== folderNavigationRef.current) return;
+      setFolderPath(path);
+      setSelectedFile(file);
+      setFileSelectionRevision((revision) => revision + 1);
+      setCurrentView('all-files');
+    } catch (error) {
+      if (navigation === folderNavigationRef.current) addToast('Unable to open file location', error instanceof Error ? error.message : undefined, 'error');
+    }
+  };
 
   // ===== إجراءات الملفّات =====
   const handleDownloadFile = (file: FileItem) => {
@@ -362,7 +438,7 @@ export default function App() {
         storageTotalTB={storageTotalTB}
       />
 
-      <div className="pl-72 flex-1 flex flex-col min-h-screen">
+      <div className="md:pl-72 min-w-0 flex-1 flex flex-col min-h-screen">
         <Header
           onOpenCommandPalette={() => setIsCommandPaletteOpen(true)}
           viewLayout={viewLayout}
@@ -385,7 +461,7 @@ export default function App() {
               onRetry={() => void reloadWorkspace()}
               onOpenUpload={() => setIsUploadOpen(true)}
               onOpenCreateShare={() => openShare()}
-              onSelectFile={(f) => setSelectedFile(f)}
+              onSelectFile={(f) => void openFileLocation(f)}
               onDownloadFile={handleDownloadFile}
               onNavigateToAllFiles={() => setCurrentView('all-files')}
               onNavigateToTrash={() => setCurrentView('recovery-trash')}
@@ -395,7 +471,15 @@ export default function App() {
 
           {currentView === 'all-files' && (
             <AllFilesView
-              files={files}
+              key={`${currentFolderId ?? 'root'}:${fileSelectionRevision}`}
+              files={files.filter((file) => (file.parentId ?? null) === currentFolderId)}
+              folders={childFolders}
+              folderPath={folderPath}
+              foldersLoading={foldersLoading}
+              foldersError={foldersError}
+              onNavigateFolder={navigateFolder}
+              onCreateFolder={handleCreateFolder}
+              onRetryFolders={() => setFolderRevision((revision) => revision + 1)}
               viewLayout={viewLayout}
               shareRevision={shareRevision}
               isLoading={filesLoading}
@@ -458,10 +542,7 @@ export default function App() {
           {currentView === 'recent-starred' && (
             <RecentStarredView
               files={files}
-              onSelectFile={(f) => {
-                setSelectedFile(f);
-                setCurrentView('all-files');
-              }}
+              onSelectFile={(f) => void openFileLocation(f)}
               onToggleStar={handleToggleStar}
               onDownloadFile={handleDownloadFile}
               onOpenCreateShare={(t) => openShare(t)}
@@ -500,7 +581,8 @@ export default function App() {
       <UploadModal
         isOpen={isUploadOpen}
         onClose={() => setIsUploadOpen(false)}
-        folderId={null}
+        folderId={currentFolderId}
+        folderName={currentFolder?.path ?? '/'}
         onUploaded={() => { void reloadFiles().catch(() => {}); void reloadWorkspace(); }}
         onToast={addToast}
       />
@@ -532,10 +614,7 @@ export default function App() {
         isOpen={isCommandPaletteOpen}
         onClose={() => setIsCommandPaletteOpen(false)}
         files={files}
-        onSelectFile={(f) => {
-          setSelectedFile(f);
-          setCurrentView('all-files');
-        }}
+        onSelectFile={(f) => void openFileLocation(f)}
         onChangeView={(v) => setCurrentView(v)}
         onOpenUpload={() => setIsUploadOpen(true)}
         onOpenCreateShare={() => openShare()}

@@ -388,7 +388,7 @@ async function renameOrMove(
     }
   })();
   if (target && !overwrite) throw errors.conflict('Destination exists and Overwrite is false.');
-  if (target && target.file?.id === source.file?.id) return { replaced: false };
+  if (target?.file && source.file && target.file.id === source.file.id) return { replaced: false };
   if (target) await deleteResource(userId, target, true);
   const { parentPath, name } = pathSegments(destination);
   const parent = await resolveFolderPath(userId, parentPath);
@@ -408,7 +408,7 @@ async function renameOrMove(
       [parent?.id ?? null, cleanName, newPath, Date.now(), folder.id],
     );
     await client.query(
-      `UPDATE ${tb('folders')} SET path = $1 || substr(path, $2 + 1), updated_at = $3
+      `UPDATE ${tb('folders')} SET path = $1 || substr(path, $2::int + 1), updated_at = $3
        WHERE user_id = $4 AND starts_with(path, $5) AND path <> $5`,
       [newPath, folder.path.length, Date.now(), userId, prefix],
     );
@@ -435,10 +435,14 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
     app.addHttpMethod(method);
   }
   app.setErrorHandler(davErrorHandler);
-  app.addContentTypeParser(/^((?!application\/json|text\/plain).)*$/i, (_request, payload, done) => {
+  // DAV uploads are files, even when their media type is JSON or plain text.
+  // Keep these parsers scoped here so the browser's JSON API is unaffected.
+  app.removeAllContentTypeParsers();
+  app.addContentTypeParser('*', (_request, payload, done) => {
     done(null, payload);
   });
   app.addHook('preHandler', async (request, reply) => {
+    reply.header('DAV', '1, 2').header('MS-Author-Via', 'DAV');
     if (request.method === 'OPTIONS') return;
     const credentials = requestCredentials(request);
     const user = credentials ? await authenticateCredentials(credentials.username, credentials.secret) : null;
@@ -516,8 +520,20 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
     GET: async (request, reply) => {
       const user = requireDavUser(request);
       const resource = await resolveResource(user.id, decodeDavPath(request));
-      if (resource.folder) return reply.code(405).header('Allow', davAllow).send();
-      if (!resource.file) throw errors.notFound('WebDAV resource not found.');
+      if (!resource.file) {
+        reply.type('text/html; charset=utf-8').header('Cache-Control', 'private, no-store');
+        if (request.method === 'HEAD') return reply.code(200).send();
+        const folderId = resource.folder?.id ?? null;
+        const base = resource.path === '/' ? '' : resource.path;
+        const folders = await Folders.listChildren(user.id, folderId);
+        const files = await Files.list(user.id, { folderId, limit: 10_000 });
+        const links = [
+          ...folders.map((folder) => `<li><a href="${xml(href(folder.path, true))}">${xml(folder.name)}/</a></li>`),
+          ...files.map((file) => `<li><a href="${xml(href(`${base}/${file.name}`, false))}">${xml(file.name)}</a></li>`),
+        ];
+        const parent = resource.path === '/' ? '' : `<p><a href="${xml(href(pathSegments(resource.path).parentPath, true))}">Parent directory</a></p>`;
+        return reply.send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tdrive WebDAV</title><h1>${xml(resource.path)}</h1>${parent}<ul>${links.join('')}</ul></html>`);
+      }
       return serveFileRange(request, reply, resource.file, { attachment: true });
     },
     PUT: async (request, reply) => {
@@ -647,6 +663,25 @@ export default async function webDavRoutes(app: FastifyInstance): Promise<void> 
       return reply.code(204).send();
     },
   };
+
+  // Windows WebClient probes the host root before opening the /dav share.
+  // Expose discovery only here; keep GET / serving the normal web application.
+  app.options('/', options);
+  app.route({
+    method: 'PROPFIND',
+    url: '/',
+    handler: async (request, reply) => {
+      const depth = singleHeader(request.headers.depth) ?? '1';
+      if (!['0', '1', 'infinity'].includes(depth.toLowerCase())) {
+        throw errors.badRequest('WebDAV Depth must be 0, 1, or infinity.');
+      }
+      const root = propResponse('/').replace('<d:href>/dav/</d:href>', '<d:href>/</d:href>');
+      const share = depth === '0' ? '' : propResponse('/');
+      return reply.code(207).type('application/xml; charset=utf-8').send(
+        `<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">${root}${share}</d:multistatus>`,
+      );
+    },
+  });
 
   const methods = Object.keys(handlers) as HTTPMethods[];
   for (const url of ['/dav', '/dav/*']) {

@@ -35,7 +35,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const initials = username.slice(0, 2).toLocaleUpperCase();
 
   return (
-    <aside className="fixed left-0 top-0 h-screen w-72 bg-surface-container-lowest flex flex-col z-50 border-r border-white/5 shadow-[0_0_24px_rgba(0,0,0,0.4)]">
+    <aside className="hidden md:flex fixed left-0 top-0 h-screen w-72 bg-surface-container-lowest flex-col z-50 border-r border-white/5 shadow-[0_0_24px_rgba(0,0,0,0.4)]">
       {/* Brand Header */}
       <div className="p-5 flex items-center justify-between border-b border-white/5">
         <div className="flex items-center gap-2.5">

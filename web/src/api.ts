@@ -45,6 +45,14 @@ export interface ApiJob {
   maxAttempts?: number;
 }
 
+export interface ApiFolder {
+  id: string;
+  name: string;
+  parentId: string | null;
+  path: string;
+  modified: number;
+}
+
 export class ApiError extends Error {
   code: string;
   status: number;
@@ -117,6 +125,13 @@ export const files = {
   streamUrl: (id: string) => `/api/files/${id}/stream`,
   downloadUrl: (id: string) => `/api/files/${id}/download`,
   thumbUrl: (id: string) => `/api/files/${id}/thumbnail`,
+};
+
+export const folders = {
+  list: (parentId: string | null = null) =>
+    req<{ folders: ApiFolder[] }>(`/api/folders?parentId=${encodeURIComponent(parentId ?? 'root')}`),
+  create: (name: string, parentId: string | null = null) =>
+    req<{ folder: ApiFolder }>('/api/folders', { method: 'POST', body: JSON.stringify({ name, parentId }) }),
 };
 
 // ===== التحميل من الروابط =====
@@ -348,7 +363,7 @@ export function uploadFile(
   opts: { folderId?: string | null; onProgress?: (fraction: number, speed: string) => void } = {},
 ): UploadHandle {
   const controller = new AbortController();
-  const clientKey = `${file.name}:${file.size}:${file.lastModified}`.slice(0, 128).padEnd(8, '0');
+  const clientKey = `${opts.folderId ?? 'root'}:${file.size}:${file.lastModified}:${file.name}`.slice(0, 128).padEnd(8, '0');
 
   const run = async (): Promise<ApiFile> => {
     const init = await req<{

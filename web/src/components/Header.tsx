@@ -22,10 +22,11 @@ export const Header: React.FC<HeaderProps> = ({
   const initials = username.slice(0, 2).toLocaleUpperCase();
 
   return (
-    <header className="fixed top-0 left-72 right-0 h-16 bg-surface-container-lowest/80 backdrop-blur-xl z-40 border-b border-white/5 shadow-[0_1px_8px_rgba(0,0,0,0.04)]">
-      <div className="h-16 w-full px-6 flex items-center justify-between gap-5">
+    <header className="fixed top-0 left-0 md:left-72 right-0 h-16 bg-surface-container-lowest/80 backdrop-blur-xl z-40 border-b border-white/5 shadow-[0_1px_8px_rgba(0,0,0,0.04)]">
+      <div className="h-16 w-full px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-5">
+        <button type="button" onClick={onOpenCommandPalette} aria-label="Open navigation and search" className="md:hidden shrink-0 min-h-11 min-w-11 rounded-lg text-primary hover:bg-surface-container"><span aria-hidden="true" className="material-symbols-outlined">menu</span></button>
         {/* Omnisearch Bar */}
-        <div className="flex-1 max-w-xl">
+        <div className="flex-1 min-w-0 max-w-xl">
           <div
             onClick={onOpenCommandPalette}
             className="relative flex items-center cursor-pointer group"
@@ -48,7 +49,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Right Controls */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1 sm:gap-3">
           {/* Filter options */}
           <div className="hidden xl:flex items-center gap-1 bg-surface-container-low p-0.5 rounded-lg border border-white/5">
             <button
@@ -113,7 +114,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Notifications Button & Dropdown */}
-          <div className="relative">
+          <div className="relative hidden sm:block">
             <button
               type="button"
               onClick={() => setShowNotifications(!showNotifications)}
@@ -157,7 +158,7 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
 
           {/* Avatar */}
-          <span aria-label={username} title={username} className="w-8 h-8 rounded-full bg-primary-container text-on-primary-container ring-1 ring-white/10 flex items-center justify-center text-[11px] font-semibold">{initials}</span>
+          <span aria-label={username} title={username} className="hidden sm:flex w-8 h-8 rounded-full bg-primary-container text-on-primary-container ring-1 ring-white/10 items-center justify-center text-[11px] font-semibold">{initials}</span>
         </div>
       </div>
     </header>

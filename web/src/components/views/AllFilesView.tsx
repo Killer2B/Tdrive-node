@@ -5,6 +5,13 @@ import { VideoPlayer } from '../VideoPlayer';
 
 interface AllFilesViewProps {
   files: FileItem[];
+  folders: api.ApiFolder[];
+  folderPath: api.ApiFolder[];
+  foldersLoading: boolean;
+  foldersError: string | null;
+  onNavigateFolder: (path: api.ApiFolder[]) => void;
+  onCreateFolder: (name: string) => Promise<void>;
+  onRetryFolders: () => void;
   viewLayout: 'grid' | 'list';
   shareRevision: number;
   isLoading: boolean;
@@ -22,6 +29,13 @@ interface AllFilesViewProps {
 
 export const AllFilesView: React.FC<AllFilesViewProps> = ({
   files,
+  folders,
+  folderPath,
+  foldersLoading,
+  foldersError,
+  onNavigateFolder,
+  onCreateFolder,
+  onRetryFolders,
   viewLayout,
   shareRevision,
   isLoading,
@@ -45,6 +59,30 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState<string | null>(null);
   const [detailsReload, setDetailsReload] = useState(0);
+  const [showCreateFolder, setShowCreateFolder] = useState(false);
+  const [folderName, setFolderName] = useState('');
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [createFolderError, setCreateFolderError] = useState<string | null>(null);
+
+  const createFolder = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (creatingFolder || !folderName.trim()) return;
+    setCreatingFolder(true);
+    setCreateFolderError(null);
+    try {
+      await onCreateFolder(folderName.trim());
+      setFolderName('');
+      setShowCreateFolder(false);
+    } catch (error) {
+      setCreateFolderError(error instanceof Error ? error.message : 'Unable to create folder.');
+    } finally {
+      setCreatingFolder(false);
+    }
+  };
+
+  useEffect(() => {
+    setSelectedIds((ids) => ids.filter((id) => files.some((file) => file.id === id)));
+  }, [files]);
 
   // Filtered files
   const filteredFiles = files.filter((file) => {
@@ -102,15 +140,15 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
       {/* Sub-Header Command Bar: Breadcrumb, Metrics & High-Level Actions */}
       <div className="px-6 py-3.5 bg-surface-container-low border-b border-white/5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
         <div className="flex items-center gap-3 flex-wrap">
-          <nav className="flex items-center gap-1.5 font-mono text-xs text-outline">
-            <span className="flex items-center gap-1 text-outline">
-              <span className="material-symbols-outlined text-sm">dns</span>
+          <nav aria-label="Folder breadcrumb" className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-outline min-w-0">
+            <button type="button" aria-current={folderPath.length === 0 ? 'page' : undefined} onClick={() => onNavigateFolder([])} className="flex items-center gap-1 min-h-11 hover:text-primary rounded focus-visible:outline focus-visible:outline-primary">
+              <span aria-hidden="true" className="material-symbols-outlined text-sm">dns</span>
               Workspace
-            </span>
-            <span className="material-symbols-outlined text-sm text-outline-variant">chevron_right</span>
-            <span className="text-on-surface font-medium bg-surface-container-high px-2 py-0.5 rounded">
-              {activeInspectionFile?.name ?? 'All files'}
-            </span>
+            </button>
+            {folderPath.map((folder, index) => <React.Fragment key={folder.id}>
+              <span aria-hidden="true" className="material-symbols-outlined text-sm text-outline-variant">chevron_right</span>
+              <button type="button" aria-current={index === folderPath.length - 1 ? 'page' : undefined} onClick={() => onNavigateFolder(folderPath.slice(0, index + 1))} className="min-h-11 max-w-48 truncate text-on-surface font-medium bg-surface-container-high px-2 rounded hover:text-primary focus-visible:outline focus-visible:outline-primary" title={folder.name}>{folder.name}</button>
+            </React.Fragment>)}
           </nav>
           <div className="h-3.5 w-px bg-surface-container-highest mx-1 hidden md:block"></div>
           <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container text-secondary text-xs font-mono">
@@ -120,7 +158,9 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
         </div>
 
         {/* Top Action Set */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {folderPath.length > 0 && <button type="button" onClick={() => onNavigateFolder(folderPath.slice(0, -1))} className="min-h-11 flex items-center gap-1.5 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-mono rounded"><span aria-hidden="true" className="material-symbols-outlined text-base">arrow_upward</span>Parent folder</button>}
+          <button type="button" onClick={() => setShowCreateFolder((open) => !open)} aria-expanded={showCreateFolder} className="min-h-11 flex items-center gap-1.5 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-mono rounded"><span aria-hidden="true" className="material-symbols-outlined text-base">create_new_folder</span>New folder</button>
           <button
             type="button"
             onClick={onExportAuditLogs}
@@ -139,6 +179,16 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
           </button>
         </div>
       </div>
+
+      {showCreateFolder && <form onSubmit={(event) => void createFolder(event)} className="px-6 py-4 bg-surface-container-low border-b border-white/5 space-y-2">
+        <label htmlFor="folder-name" className="block font-mono text-xs text-outline">Folder name</label>
+        <div className="flex flex-wrap gap-2">
+          <input id="folder-name" autoFocus required maxLength={200} disabled={creatingFolder} value={folderName} onChange={(event) => setFolderName(event.target.value)} className="min-w-0 flex-1 bg-surface-container-lowest border border-white/10 text-on-surface text-sm p-3 rounded-lg focus:outline-none focus:border-primary-container" />
+          <button type="submit" disabled={creatingFolder || !folderName.trim()} className="min-h-11 px-4 rounded-lg bg-primary-container text-on-primary-container font-mono text-xs disabled:opacity-50">{creatingFolder ? 'Creating...' : 'Create folder'}</button>
+          <button type="button" disabled={creatingFolder} onClick={() => setShowCreateFolder(false)} className="min-h-11 px-3 rounded-lg text-outline hover:bg-surface-container disabled:opacity-50">Cancel</button>
+        </div>
+        {createFolderError && <p role="alert" className="text-sm text-error">{createFolderError}</p>}
+      </form>}
 
       {/* Filter, Bulk Operation & Controls Strip */}
       <div className="px-6 py-2 bg-surface-container-lowest border-b border-white/5 flex flex-wrap items-center justify-between gap-4">
@@ -223,7 +273,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name })}
+                onClick={() => { if (activeInspectionFile) onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name }); }}
                 className="flex items-center gap-1 px-2 py-0.5 rounded text-on-surface hover:bg-surface-bright font-mono text-xs transition-colors"
                 title="Share link"
               >
@@ -280,6 +330,20 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
       <div className="flex-1 flex flex-col xl:flex-row w-full overflow-hidden">
         {/* Central Explorer Table Area */}
         <div className="flex-1 overflow-x-auto min-w-0 bg-surface">
+          <section aria-label="Folders" className="p-4 border-b border-white/5 space-y-3">
+            <h2 className="font-mono text-xs text-outline uppercase tracking-wider">Folders</h2>
+            {foldersLoading && <p role="status" className="text-sm text-outline">Loading folders...</p>}
+            {foldersError && <div role="alert" className="flex flex-wrap gap-3 text-sm text-error"><span>{foldersError}</span><button type="button" onClick={onRetryFolders} className="underline">Retry folders</button></div>}
+            {!foldersLoading && !foldersError && folders.length === 0 && <p className="text-xs text-outline">No folders here. Use New folder to create one.</p>}
+            <div className={viewLayout === 'grid' ? 'grid grid-cols-1 sm:grid-cols-2 gap-3' : 'flex flex-col gap-1'}>
+              {[...folders].sort((a, b) => a.name.localeCompare(b.name)).map((folder) => <button key={folder.id} type="button" onClick={() => onNavigateFolder([...folderPath, folder])} className="min-h-11 flex items-center gap-3 p-3 rounded-xl bg-surface-container-low border border-white/5 text-left hover:bg-surface-container-high focus-visible:outline focus-visible:outline-primary transition-colors">
+                <span aria-hidden="true" className="material-symbols-outlined text-primary">folder</span>
+                <span className="flex-1 min-w-0 truncate text-sm text-on-surface" title={folder.name}>{folder.name}</span>
+                <span aria-hidden="true" className="material-symbols-outlined text-outline">chevron_right</span>
+              </button>)}
+            </div>
+          </section>
+          {loadError && files.length > 0 && <div role="alert" className="p-4 flex gap-3 text-sm text-error"><span>{loadError}</span><button type="button" onClick={onRetry} className="underline">Retry files</button></div>}
           <div className={viewLayout === 'list' ? 'min-w-[780px]' : ''}>
             {/* Table Header Bar */}
             {viewLayout === 'list' && <div className="grid grid-cols-[40px_minmax(240px,2.5fr)_130px_100px_160px_48px] items-center px-6 py-2 bg-surface-container-lowest font-mono text-[11px] text-outline uppercase tracking-wider select-none border-b border-white/5">
@@ -403,7 +467,7 @@ export const AllFilesView: React.FC<AllFilesViewProps> = ({
                 <span className="material-symbols-outlined text-2xl">upload_file</span>
               </div>
               <div>
-                <h4 className="text-base text-on-surface font-semibold">Upload files to this workspace</h4>
+                <h4 className="text-base text-on-surface font-semibold">Upload files to this folder</h4>
                 <p className="text-xs text-outline mt-0.5">
                   Files are uploaded to the server using its configured chunk size and storage backend.
                 </p>

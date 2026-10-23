@@ -20,6 +20,15 @@ import apiV1Routes from './api-v1.ts';
 import webDavRoutes from './webdav.ts';
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  // Revalidate the SPA shell so deployments cannot keep loading removed bundles.
+  app.addHook('onSend', async (_request, reply, payload) => {
+    if (String(reply.getHeader('content-type')).startsWith('text/html') &&
+        String(reply.getHeader('cache-control')).startsWith('public')) {
+      reply.header('Cache-Control', 'no-cache');
+    }
+    return payload;
+  });
+
   // صحّة عامّة
   app.get('/health', async () => ({ status: 'ok', time: Date.now() }));
 
@@ -56,7 +65,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
     // توجيه مسارات SPA العميقة إلى index.html (عدا /api)
     app.setNotFoundHandler((request, reply) => {
-      if (request.raw.url && (request.raw.url.startsWith('/api') || request.raw.url.startsWith('/health'))) {
+      if (
+        (request.method !== 'GET' && request.method !== 'HEAD') ||
+        (request.raw.url && (request.raw.url.startsWith('/api') || request.raw.url.startsWith('/health') || /^\/dav(?:\/|\?|$)/.test(request.raw.url)))
+      ) {
         reply.code(404).send({ error: { code: 'NotFound', message: 'المسار غير موجود.' } });
         return;
       }
@@ -64,7 +76,10 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     });
   } else {
     app.setNotFoundHandler((request, reply) => {
-      if (request.raw.url && request.raw.url.startsWith('/api')) {
+      if (
+        (request.method !== 'GET' && request.method !== 'HEAD') ||
+        (request.raw.url && (request.raw.url.startsWith('/api') || /^\/dav(?:\/|\?|$)/.test(request.raw.url)))
+      ) {
         reply.code(404).send({ error: { code: 'NotFound', message: 'المسار غير موجود.' } });
         return;
       }

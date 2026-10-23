@@ -66,7 +66,7 @@ export default async function miscRoutes(app: FastifyInstance): Promise<void> {
     if (!ok) throw errors.badRequest('كلمة المرور الحالية غير صحيحة.');
     await Users.updatePassword(user.id, await hashPassword(body.next));
     // أبطل كل الجلسات الأخرى لإجبار إعادة الدخول
-    await Sessions.deleteAllForUser(user.id);
+    await Sessions.deleteAllForUser(user.id, request.sessionId);
     // كلمة المرور القديمة قد تكون مخزّنة في كاش WebDAV/API ⇒ أبطله فورًا
     invalidateCredentialCache();
     await Activity.record({ userId: user.id, action: 'password_changed', targetType: 'account', ip: request.ip });

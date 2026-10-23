@@ -237,8 +237,11 @@ export const Sessions = {
   async deleteExpired(): Promise<number> {
     return exec(`DELETE FROM ${tb('sessions')} WHERE expires_at < $1`, [now()]);
   },
-  async deleteAllForUser(user_id: string): Promise<void> {
-    await exec(`DELETE FROM ${tb('sessions')} WHERE user_id = $1`, [user_id]);
+  async deleteAllForUser(user_id: string, exceptId?: string): Promise<void> {
+    await exec(
+      `DELETE FROM ${tb('sessions')} WHERE user_id = $1${exceptId ? ' AND id <> $2' : ''}`,
+      exceptId ? [user_id, exceptId] : [user_id],
+    );
   },
   async listByUser(user_id: string): Promise<SessionRow[]> {
     return query<SessionRow>(

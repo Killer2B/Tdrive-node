@@ -37,7 +37,7 @@ export function sanitizeFileName(input: string, fallback = 'file'): string {
   if (name === '' || name === '.' || name === '..') name = fallback;
 
   // تجنّب الأسماء المحجوزة على Windows
-  const { stem, ext } = splitExt(name);
+  const { stem } = splitExt(name);
   if (WINDOWS_RESERVED.has(stem.toLowerCase())) {
     name = `_${name}`;
   }

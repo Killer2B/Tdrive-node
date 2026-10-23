@@ -21,6 +21,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
   const [createdApiKeyId, setCreatedApiKeyId] = useState<string | null>(null);
   const [apiKeyMessage, setApiKeyMessage] = useState<string | null>(null);
   const [apiKeysBusy, setApiKeysBusy] = useState(false);
+  const [apiKeysLoading, setApiKeysLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
@@ -46,22 +47,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
       })
       .catch((error: unknown) => {
         if (active) setApiKeyMessage(error instanceof Error ? error.message : 'Unable to load API keys.');
-      });
+      })
+      .finally(() => { if (active) setApiKeysLoading(false); });
     return () => { active = false; };
   }, []);
 
   const createApiKey = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (apiKeysBusy || !apiKeyLabel.trim() || createdApiKey) return;
     setApiKeysBusy(true);
     setApiKeyMessage(null);
-    setCreatedApiKey(null);
-    setCreatedApiKeyId(null);
     try {
-      const result = await api.account.apiKeys.create(apiKeyLabel);
+      const result = await api.account.apiKeys.create(apiKeyLabel.trim());
       setCreatedApiKey(result.key);
       setCreatedApiKeyId(result.metadata.id);
       setApiKeyLabel('');
-      setApiKeys((await api.account.apiKeys.list()).keys);
+      setApiKeys((keys) => [result.metadata, ...keys]);
     } catch (error) {
       setApiKeyMessage(error instanceof Error ? error.message : 'Unable to create API key.');
     } finally {
@@ -74,7 +75,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
     setApiKeyMessage(null);
     try {
       await api.account.apiKeys.revoke(id);
-      setApiKeys((await api.account.apiKeys.list()).keys);
+      setApiKeys((keys) => keys.map((key) => key.id === id ? { ...key, revokedAt: Date.now() } : key));
       if (id === createdApiKeyId) {
         setCreatedApiKey(null);
         setCreatedApiKeyId(null);
@@ -162,23 +163,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
 
       {loadError && <div role="alert" className="p-3 rounded-lg border border-error/30 bg-error-container/20 text-error text-sm flex justify-between gap-3"><span>{loadError}</span><button type="button" onClick={() => window.location.reload()} className="underline">Retry</button></div>}
 
-      <form onSubmit={handleSave} className="space-y-6">
+      <div className="space-y-6">
         <section className="p-6 rounded-xl bg-surface-container-low border border-white/5 space-y-4 shadow-xl">
           <div><h2 className="text-base font-semibold text-on-surface">Storage & Display</h2><p className="text-xs text-outline mt-0.5">Quota is an application limit label; there is no external billing provider configured.</p></div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <label className="space-y-1.5"><span className="block font-mono text-xs text-outline uppercase">Storage quota (decimal GB)</span><input type="number" min="1" step="1" value={quotaGb} onChange={(event) => setQuotaGb(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface font-mono text-sm p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
-            <label className="space-y-1.5"><span className="block font-mono text-xs text-outline uppercase">Trash retention (days)</span><input type="number" min="1" max="3650" step="1" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface font-mono text-sm p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
+            <label className="space-y-1.5"><span className="block font-mono text-xs text-outline uppercase">Storage quota (decimal GB)</span><input form="workspace-settings" type="number" min="1" step="1" value={quotaGb} onChange={(event) => setQuotaGb(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface font-mono text-sm p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
+            <label className="space-y-1.5"><span className="block font-mono text-xs text-outline uppercase">Trash retention (days)</span><input form="workspace-settings" type="number" min="1" max="3650" step="1" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface font-mono text-sm p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
           </div>
           <fieldset className="space-y-2"><legend className="font-mono text-xs text-outline uppercase">Default file layout</legend><div className="flex gap-3">
-            {(['grid', 'list'] as const).map((view) => <label key={view} className={`px-4 py-2 rounded-lg border cursor-pointer ${defaultView === view ? 'border-primary-container bg-surface-container text-primary' : 'border-white/5 text-on-surface-variant'}`}><input className="sr-only" type="radio" name="defaultView" value={view} checked={defaultView === view} onChange={() => setDefaultView(view)} />{view === 'grid' ? 'Grid' : 'List'}</label>)}
+            {(['grid', 'list'] as const).map((view) => <label key={view} className={`px-4 py-2 rounded-lg border cursor-pointer ${defaultView === view ? 'border-primary-container bg-surface-container text-primary' : 'border-white/5 text-on-surface-variant'}`}><input form="workspace-settings" className="sr-only" type="radio" name="defaultView" value={view} checked={defaultView === view} onChange={() => setDefaultView(view)} />{view === 'grid' ? 'Grid' : 'List'}</label>)}
           </div></fieldset>
         </section>
 
         <section className="p-6 rounded-xl bg-surface-container-low border border-white/5 space-y-4 shadow-xl">
           <div><h2 className="text-base font-semibold text-on-surface">Change Password</h2><p className="text-xs text-outline mt-0.5">Changing the password revokes other active sessions.</p></div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <label className="space-y-1.5"><span className="block font-mono text-xs text-outline">Current password</span><input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
-            <label className="space-y-1.5"><span className="block font-mono text-xs text-outline">New password</span><input type="password" autoComplete="new-password" minLength={8} value={nextPassword} onChange={(event) => setNextPassword(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
+            <label className="space-y-1.5"><span className="block font-mono text-xs text-outline">Current password</span><input form="workspace-settings" type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
+            <label className="space-y-1.5"><span className="block font-mono text-xs text-outline">New password</span><input form="workspace-settings" type="password" autoComplete="new-password" minLength={8} value={nextPassword} onChange={(event) => setNextPassword(event.target.value)} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" /></label>
           </div>
         </section>
 
@@ -187,14 +188,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
             <div><h2 className="text-base font-semibold text-on-surface">Developer API keys</h2><p className="text-xs text-outline mt-0.5">Keys grant access to your files. The full value is shown only once.</p></div>
             <a href="/developers" target="_blank" rel="noreferrer" className="text-xs text-primary underline">API documentation</a>
           </div>
-          <form onSubmit={(event) => void createApiKey(event)} className="flex flex-col sm:flex-row gap-2">
-            <input aria-label="API key label" required maxLength={100} value={apiKeyLabel} onChange={(event) => setApiKeyLabel(event.target.value)} placeholder="Key label (e.g. backup script)" className="min-w-0 flex-1 bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" />
-            <button type="submit" disabled={apiKeysBusy || !apiKeyLabel.trim()} className="px-4 py-2 rounded-lg bg-primary-container text-on-primary-container font-mono text-xs font-semibold disabled:opacity-50">Generate key</button>
+          <form aria-label="Create API key" onSubmit={(event) => void createApiKey(event)} className="space-y-2">
+            <label htmlFor="api-key-label" className="block font-mono text-xs text-outline">API key label</label>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input id="api-key-label" required maxLength={100} disabled={apiKeysBusy} value={apiKeyLabel} onChange={(event) => setApiKeyLabel(event.target.value)} placeholder="Key label (e.g. backup script)" className="min-w-0 flex-1 bg-surface-container-lowest border border-white/5 text-on-surface p-3 rounded-lg focus:outline-none focus:border-primary-container" />
+              <button type="submit" disabled={apiKeysLoading || apiKeysBusy || !!createdApiKey || !apiKeyLabel.trim()} className="min-h-11 px-4 py-2 rounded-lg bg-primary-container text-on-primary-container font-mono text-xs font-semibold disabled:opacity-50">{apiKeysBusy ? 'Working...' : 'Generate key'}</button>
+            </div>
           </form>
           {createdApiKey && <div role="alert" className="space-y-2 rounded-lg border border-error/40 bg-error-container/10 p-3">
             <p className="text-xs text-error">Copy this key now. It cannot be displayed again.</p>
             <input aria-label="New API key" readOnly value={createdApiKey} onFocus={(event) => event.currentTarget.select()} className="w-full bg-surface-container-lowest border border-white/5 text-on-surface font-mono text-xs p-3 rounded-lg" />
             <button type="button" onClick={() => setCreatedApiKey(null)} className="text-xs text-outline underline">Hide key</button>
+            <p className="text-xs text-outline">Hide this key after copying it to generate another.</p>
           </div>}
           <ul className="divide-y divide-white/5">
             {apiKeys.map((key) => <li key={key.id} className="flex items-center justify-between gap-3 py-3">
@@ -204,7 +209,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
               </div>
               {!key.revokedAt && <button type="button" disabled={apiKeysBusy} onClick={() => void revokeApiKey(key.id)} className="shrink-0 text-xs text-error underline disabled:opacity-50">Revoke</button>}
             </li>)}
-            {apiKeys.length === 0 && <li className="py-3 text-xs text-outline">No API keys have been created.</li>}
+            {apiKeysLoading && <li role="status" className="py-3 text-xs text-outline">Loading API keys...</li>}
+            {!apiKeysLoading && !apiKeyMessage && apiKeys.length === 0 && <li className="py-3 text-xs text-outline">No API keys have been created.</li>}
           </ul>
           {apiKeyMessage && <p role="alert" className="text-sm text-error">{apiKeyMessage}</p>}
         </section>
@@ -231,8 +237,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onSaved }) => {
         </section>
 
         {message && <p role="status" className={`text-sm ${message.startsWith('حُفظ') ? 'text-secondary-fixed' : 'text-error'}`}>{message}</p>}
-        <div className="flex items-center justify-end pt-2"><button type="submit" disabled={saving || !!loadError} className="px-6 py-2.5 bg-primary-container text-on-primary-container font-mono text-xs font-semibold rounded-lg shadow-lg disabled:opacity-50">{saving ? 'Saving…' : 'Save settings'}</button></div>
-      </form>
+        <form id="workspace-settings" onSubmit={handleSave} className="flex items-center justify-end pt-2"><button type="submit" disabled={saving || !!loadError} className="px-6 py-2.5 bg-primary-container text-on-primary-container font-mono text-xs font-semibold rounded-lg shadow-lg disabled:opacity-50">{saving ? 'Saving…' : 'Save settings'}</button></form>
+      </div>
     </div>
   );
 };
