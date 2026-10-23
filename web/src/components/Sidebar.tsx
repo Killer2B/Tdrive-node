@@ -23,11 +23,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
   const navItems: { id: ViewMode; label: string; icon: string; section: 'workspace' | 'management' }[] = [
     { id: 'overview', label: 'Overview', icon: 'dashboard', section: 'workspace' },
-    { id: 'all-files', label: 'All Files', icon: 'folder_open', section: 'workspace' },
+    { id: 'all-files', label: 'My files', icon: 'folder_open', section: 'workspace' },
     { id: 'recent-starred', label: 'Recent & Starred', icon: 'star', section: 'workspace' },
-    { id: 'shared-vaults', label: 'Shared Vaults', icon: 'folder_shared', section: 'workspace' },
-    { id: 'recovery-trash', label: 'Recovery / Trash', icon: 'delete_outline', section: 'management' },
-    { id: 'security-access', label: 'Security & Audit', icon: 'shield', section: 'management' },
+    { id: 'shared-vaults', label: 'Shared links', icon: 'folder_shared', section: 'workspace' },
+    { id: 'recovery-trash', label: 'Trash', icon: 'delete_outline', section: 'management' },
+    { id: 'security-access', label: 'Security', icon: 'shield', section: 'management' },
     { id: 'workspace-settings', label: 'Settings', icon: 'settings', section: 'management' },
   ];
 
@@ -50,9 +50,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-surface-container text-on-surface-variant text-xs font-mono">
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-surface-container text-on-surface-variant text-xs">
           <span className="w-1.5 h-1.5 rounded-full bg-secondary-container" />
-          <span>Personal workspace</span>
+          <span>Personal</span>
         </div>
       </div>
 
@@ -62,10 +62,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <button
             onClick={onOpenUpload}
             type="button"
-            className="flex-1 flex items-center gap-2 px-4 py-2.5 bg-primary-container text-on-primary-container text-sm font-semibold hover:bg-secondary-container hover:text-on-secondary-fixed-variant transition-all cursor-pointer"
+            className="min-h-11 flex-1 flex items-center gap-2 px-4 py-2.5 bg-primary-container text-on-primary-container text-sm font-semibold hover:bg-secondary-container hover:text-on-secondary-fixed-variant transition-all cursor-pointer focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary"
           >
             <span className="material-symbols-outlined text-lg">add_circle</span>
-            <span>New Upload</span>
+            <span>Upload</span>
           </button>
         </div>
       </div>
@@ -80,8 +80,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           return (
             <button
               key={item.id}
+              type="button"
+              aria-current={isActive ? 'page' : undefined}
               onClick={() => onNavigate(item.id)}
-              className={`w-full flex items-center gap-3 px-3.5 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer ${
+              className={`min-h-11 w-full flex items-center gap-3 px-3.5 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:outline-primary ${
                 isActive
                   ? 'bg-surface-container-high text-primary font-medium shadow-sm'
                   : 'text-on-surface-variant hover:bg-surface-container hover:text-on-surface'
@@ -103,8 +105,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           return (
             <button
               key={item.id}
+              type="button"
+              aria-current={isActive ? 'page' : undefined}
               onClick={() => onNavigate(item.id)}
-              className={`w-full flex items-center gap-3 px-3.5 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer ${
+              className={`min-h-11 w-full flex items-center gap-3 px-3.5 py-2 rounded-lg text-sm transition-colors text-left cursor-pointer focus-visible:outline-2 focus-visible:outline-primary ${
                 isActive
                   ? 'bg-surface-container-high text-primary font-medium shadow-sm'
                   : 'text-on-surface-variant hover:bg-surface-container hover:text-on-surface'
@@ -153,8 +157,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
           </div>
           <button
+            type="button"
             onClick={() => onNavigate('workspace-settings')}
-            className="text-on-surface-variant hover:text-on-surface p-1 rounded hover:bg-surface-container transition-colors"
+            aria-label="Profile and settings"
+            className="min-h-11 min-w-11 text-on-surface-variant hover:text-on-surface p-1 rounded hover:bg-surface-container transition-colors focus-visible:outline-2 focus-visible:outline-primary"
             title="Profile & Settings"
           >
             <span className="material-symbols-outlined text-lg">more_vert</span>

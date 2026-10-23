@@ -26,7 +26,51 @@ Every JSON success uses `{ "ok": true, "data": ... }`. Errors use `{ "ok": false
 | GET | `/api/v1/me` | User identity and storage usage |
 | GET | `/api/v1/openapi.json` | OpenAPI 3.1 description |
 
-## Files
+## Drive Browser And Operations
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/drive?folderId=root&sort=name&order=asc&limit=100&offset=0` | One paginated folder page, including folders and active files |
+| GET | `/api/v1/drive?q=report` | Global literal, case-insensitive search of this user's active file and folder names |
+| GET | `/api/v1/folders/:id` | Owned folder and direct ancestry, including a virtual root breadcrumb |
+| POST | `/api/v1/operations` | Mixed-selection rename, move, copy, or file trash |
+
+The browser/session mirrors are `GET /api/drive`, `GET /api/folders/:id`, and `POST /api/drive/operations`. They use the existing signed session cookie and Origin protection; they return the data directly, without the v1 `{ok:true,data:...}` envelope.
+
+Drive data is `{folders,files,breadcrumbs,nextOffset,total}`. A folder is `{id,name,parentId,path,modified}`. Files use the browser's `toApiFile` representation: `id`, `name`, `type`, `extension`, `mime`, `size`, `sizeBytes`, `folderId`, `sha256`, `status`, `source`, `sourceUrl`, media dimensions/duration, thumbnail/star/pin/trash flags, and millisecond timestamps. This new representation intentionally differs from legacy `/api/v1/files` metadata. Search results carry file `folderId` and folder `parentId`/`path`; retrieve the parent ancestry with `/api/v1/folders/:id` when needed.
+
+`folderId` defaults to `root`; non-root values must belong to the authenticated user. `sort` is `name|modified|size`, `order` is `asc|desc`, `limit` is 1-500 (default 100), and `offset` is nonnegative. Folders precede files; the requested sort applies within each type, with stable ID tie breaks. Folder size sorts as zero. Pagination and `total` cover the combined entries, not separate folder/file pages. `q`, when present (including an empty string), searches globally; omission lists only the requested folder. `%`, `_`, and backslash in search are literal, not SQL wildcards. Listings include processing/error files, but exclude trashed files. Offset pages are not snapshot tokens; concurrent edits can change counts or page boundaries.
+
+```json
+{
+  "action": "move",
+  "items": [{"type":"folder","id":"fld_example"},{"type":"file","id":"fil_example"}],
+  "destinationId": null
+}
+```
+
+`items` contains 1-100 `{type:"file"|"folder",id}` entries. `rename` requires exactly one item and `name` (1-200 characters); `name` is not accepted for other actions. `move` and `copy` require `destinationId`, including explicit `null` for root. Destination and item ownership are checked independently. Root cannot be modified. Folder moves/copies into the source or any descendant are rejected.
+
+Each executed item has its own metadata transaction. A mixed batch is explicitly **partially successful**, not all-or-nothing:
+
+```json
+{"ok":true,"data":{"results":[
+  {"type":"file","id":"fil_example","ok":true,"item":{"id":"fil_example","name":"Notes (1).txt"}},
+  {"type":"folder","id":"fld_missing","ok":false,"error":{"code":"NotFound","message":"Folder not found."}}
+]}}
+```
+
+The example item is abbreviated; real items include their complete file/folder representation. Result `id` always identifies the source selection; a copy's new ID is in `item.id`. Redundant descendants in a move/copy batch are not executed twice: they return `ok:true,coveredBy:<ancestor-id>` if that selected ancestor succeeds, otherwise `ANCESTOR_OPERATION_FAILED`. Exact duplicate selections return `DUPLICATE_SELECTION` after the first result. Results retain input order. Clients must inspect every `ok`, not just HTTP 200. Invalid request schemas return HTTP 422 before any mutation.
+
+Names are sanitized consistently and never overwrite existing active files or folders. Collisions in the shared file/folder namespace receive ` (1)`, ` (2)`, etc., preserving short file extensions and the 200-character name limit. Renaming an item to its current name is a no-op unless another conflicting item already exists. Folder move/rename updates all descendant paths transactionally using an escaped prefix; path lengths are checked before mutation. Existing file PATCH and folder PATCH use this shared rename/move logic; browser folder PATCH also accepts `parentId`.
+
+Copies include the full active folder hierarchy and all active **ready** files, up to 10,000 subtree entries per selected item. Oversize subtrees or processing/error content fail explicitly rather than creating an incomplete copy. Configured maximum file size and workspace storage quota are checked before staging and rechecked under the per-user metadata lock; quota counts processing/pending/error and trashed rows, not only ready files. Insufficient capacity returns per-item `QUOTA_EXCEEDED`. Every copied file is streamed into independent chunk keys before a short metadata transaction; copied content never shares deletable storage/Telegram references. Copy resets stars/pins and omits thumbnails, which can be regenerated separately. On Telegram backends copies report `processing` until the transactionally queued flush completes. Source changes during staging cause an explicit conflict/retry; failed metadata transactions remove staged objects best-effort. A process crash during staging can leave unreferenced objects requiring storage cleanup.
+
+File `trash` is undoable through existing restore endpoints. Folder `trash` returns `FOLDER_TRASH_UNSUPPORTED` and changes neither hierarchy nor contained files because this schema cannot restore a folder tree safely. **Do not substitute legacy folder DELETE for trash in a normal file-manager UI.** Legacy cookie folder DELETE permanently removes hierarchy and rehomes files to root; legacy v1/DAV folder DELETE removes hierarchy after trashing enumerated files. Those legacy deletes are not folder restore.
+
+Upload initialization validates destination ownership before reuse and rejects reused `clientKey` values with different sanitized name, size, folder, or fingerprint. Aborted sessions require a fresh key. WebDAV ingestion now schedules Telegram flushing rather than leaving successful writes cache-only.
+
+## Legacy Files
 
 | Method | Path | Description |
 |---|---|---|
@@ -81,7 +125,7 @@ Create a share with `{ "permission": "view"|"download", "expiresInHours": 24, "m
 
 ## WebDAV
 
-WebDAV is mounted at `/dav/` and exposes the whole drive to any WebDAV client (Obsidian/Remotely Save, Finder, Windows Explorer, rclone, Office, …).
+WebDAV is mounted at `/dav/` for clients that implement standard WebDAV. Client compatibility depends on each client's protocol behavior and configuration; this is not a native Google Drive, OneDrive, or Office integration, and universal third-party compatibility is not guaranteed.
 
 **Authentication.** Two equivalent options:
 
@@ -106,6 +150,6 @@ When deploying browser changes, rebuild both projects: run `npm run build` in th
 
 ## Compatibility notes
 
-This Node application currently supports the routes listed above. Archived file versions, content revisions/delta uploads, content-defined chunking, and per-key quota/rate-limit settings are not implemented yet; the API index reports the versioning and CDC capabilities as disabled. Unlike the reference API, folder deletion removes the folder tree after moving its files to trash.
+This Node application currently supports the routes listed above. Archived file versions, content revisions/delta uploads, content-defined chunking, folder trash/restore, and per-key quota/rate-limit settings are not implemented yet. The API index reports these capabilities honestly, including native Google Drive/OneDrive integration as false. The new drive endpoints have typed OpenAPI response/request/parameter schemas and Basic/Bearer/X-API-Key authentication; older endpoint descriptions remain less detailed. Legacy folder deletion is destructive to hierarchy and is not equivalent to the new safe `trash` operation.
 
 The data layer runs on **Supabase (Postgres)** only — there is no local database at runtime. The application connects with `SUPABASE_DB_URL`, keeps all state in the `tdrive` schema (provisioned through Supabase MCP), and every repository call is asynchronous. `npm run db:migrate` verifies that the schema, tables and row-level-security policies are present. See [`supabase/README.md`](./supabase/README.md).

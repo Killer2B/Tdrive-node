@@ -15,6 +15,7 @@ import { errors, isAppError } from '../lib/errors.ts';
 import { isSafeSegment, normalizeVirtualPath, sanitizeFileName } from '../lib/paths.ts';
 import { loadConfig } from '../config/env.ts';
 import { serveFileRange } from './_serve.ts';
+import { enqueueFlush } from '../services/queue.ts';
 
 interface DavResource {
   path: string;
@@ -301,6 +302,7 @@ async function writeUpload(
       mime,
       computeSha: true,
     });
+    if (file.backend === 'telegram') await enqueueFlush(user.id, file.id, name);
     if (existing) {
       await Files.update(file.id, { name });
       await deleteFilePermanent(existing);

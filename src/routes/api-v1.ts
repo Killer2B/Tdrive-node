@@ -9,7 +9,6 @@ import { completeUpload, initUpload, uploadPart, uploadStatus, abortUpload } fro
 import { deleteFilePermanent, restoreFile, storageUsage, trashFile } from '../services/files.ts';
 import { createFolderAtPath, folderPath, resolveFolderPath } from '../services/folders.ts';
 import { FileChunks, Files, Folders, Shares, Uploads, type FileRow, type UserRow } from '../db/repo.ts';
-import { tb, withTransaction } from '../db/pg.ts';
 import { errors, isAppError } from '../lib/errors.ts';
 import { normalizeVirtualPath } from '../lib/paths.ts';
 import { randomBase64Url } from '../lib/ids.ts';
@@ -17,6 +16,8 @@ import { parse } from '../lib/validate.ts';
 import { hashPassword } from '../lib/password.ts';
 import { loadConfig } from '../config/env.ts';
 import { serveFileRange } from './_serve.ts';
+import { driveOperations, driveQuery, folderDetails, listDrive, operationBody, updateDriveItem } from '../services/drive.ts';
+import { documentedPaths, drivePaths, driveSchemas } from '../services/drive-openapi.ts';
 
 const API_ROOT = '/api/v1';
 const MAX_KEYS = 500;
@@ -189,6 +190,12 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       shares: true,
       contentVersions: false,
       contentDefinedChunking: false,
+      paginatedDrive: true,
+      batchOperations: true,
+      folderCopy: true,
+      folderTrashRestore: false,
+      nativeGoogleDrive: false,
+      nativeOneDrive: false,
     },
     chunkSize: cfg.upload.chunkSize,
     maxUploadBytes: cfg.upload.maxFileSize || null,
@@ -198,14 +205,17 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
     openapi: '3.1.0',
     info: { title: 'Tdrive Developer API', version: '1.0.0', description: 'REST API authenticated with a per-user API key.' },
     servers: [{ url: cfg.publicUrl }],
-    security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }],
+    security: [{ ApiKeyAuth: [] }, { BearerAuth: [] }, { BasicAuth: [] }],
     components: {
       securitySchemes: {
         ApiKeyAuth: { type: 'apiKey', in: 'header', name: 'X-API-Key' },
         BearerAuth: { type: 'http', scheme: 'bearer' },
+        BasicAuth: { type: 'http', scheme: 'basic', description: 'Account username/password, or any username with an API key as the password. HTTPS only.' },
       },
+      schemas: driveSchemas,
     },
-    paths: {
+    paths: documentedPaths({
+      ...drivePaths,
       [`${API_ROOT}`]: { get: { summary: 'API capabilities' } },
       [`${API_ROOT}/me`]: { get: { summary: 'Account profile and storage use' } },
       [`${API_ROOT}/files`]: { get: { summary: 'List files and folders by virtual path' }, post: { summary: 'Create a one-chunk upload' } },
@@ -220,8 +230,12 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
       [`${API_ROOT}/uploads/{id}/complete`]: { post: { summary: 'Finalize an upload' } },
       [`${API_ROOT}/chunks/lookup`]: { post: { summary: 'Find stored chunk checksums' } },
       [`${API_ROOT}/shares`]: { get: { summary: 'List shares' } },
-    },
+    }),
   }));
+
+  app.get(`${API_ROOT}/drive`, async (request) => apiOk(await listDrive(requireApiUser(request).id, parse(driveQuery, request.query))));
+  app.post(`${API_ROOT}/operations`, async (request) => apiOk(await driveOperations(requireApiUser(request).id, parse(operationBody, request.body))));
+  app.get(`${API_ROOT}/folders/:id`, async (request) => apiOk(await folderDetails(requireApiUser(request).id, (request.params as { id: string }).id)));
 
   app.get(`${API_ROOT}/me`, async (request) => {
     const user = requireApiUser(request);
@@ -386,7 +400,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
     const file = await ownFile(user.id, (request.params as { id: string }).id);
     const body = parse(
       z.object({
-        name: z.string().min(1).max(256).optional(),
+        name: z.string().min(1).max(200).optional(),
         path: z.string().max(1024).optional(),
         favorite: z.boolean().optional(),
       }).strict(),
@@ -394,15 +408,9 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
     );
     const folder = body.path === undefined ? null : await resolveFolderPath(user.id, apiPath(body.path));
     const patch: Partial<FileRow> = {};
-    const targetFolder = body.path === undefined ? file.folder_id : folder?.id ?? null;
-    if (body.name !== undefined) {
-      const collision = await Files.findByFolderAndName(user.id, targetFolder, body.name);
-      if (collision && collision.id !== file.id) throw errors.conflict('A file with this name already exists in the destination.');
-    }
     if (body.favorite !== undefined) patch.starred = body.favorite ? 1 : 0;
-    if (body.path !== undefined) patch.folder_id = folder?.id ?? null;
-    if (body.name !== undefined) patch.name = body.name;
-    if (Object.keys(patch).length === 0) throw errors.badRequest('No supported metadata fields were provided.');
+    if (body.name === undefined && body.path === undefined && body.favorite === undefined) throw errors.badRequest('No supported metadata fields were provided.');
+    if (body.name !== undefined || body.path !== undefined) await updateDriveItem(user.id, { type: 'file', id: file.id }, { name: body.name, destinationId: body.path === undefined ? undefined : folder?.id ?? null });
     await Files.update(file.id, patch);
     return apiOk({ file: await apiFile((await Files.findById(file.id))!) });
   });
@@ -444,23 +452,7 @@ export default async function apiV1Routes(app: FastifyInstance): Promise<void> {
     const parent = await resolveFolderPath(user.id, apiPath(body.path ?? '/'));
     const folder = await Folders.findByParentName(user.id, parent?.id ?? null, body.name);
     if (!folder) throw errors.notFound('المجلّد غير موجود.');
-    const safeName = body.newName.trim();
-    if (await Folders.findByParentName(user.id, parent?.id ?? null, safeName)) throw errors.conflict('يوجد مجلّد بهذا الاسم.');
-    const newPath = apiPath(`${body.path ?? '/'}/${safeName}`);
-    const prefix = `${folder.path}/`;
-    await withTransaction(async (client) => {
-      await client.query(
-        `UPDATE ${tb('folders')} SET name = $1, path = $2, updated_at = $3 WHERE id = $4`,
-        [safeName, newPath, Date.now(), folder.id],
-      );
-      // تحديث مسارات كل الأبناء في نفس المعاملة
-      await client.query(
-        `UPDATE ${tb('folders')} SET path = $1 || substr(path, $2 + 1), updated_at = $3
-         WHERE user_id = $4 AND starts_with(path, $5) AND path <> $5`,
-        [newPath, folder.path.length, Date.now(), user.id, prefix],
-      );
-    });
-    return apiOk({ folder: { id: folder.id, name: safeName, path: newPath } });
+    return apiOk({ folder: await updateDriveItem(user.id, { type: 'folder', id: folder.id }, { name: body.newName }) });
   });
 
   app.delete(`${API_ROOT}/folders`, async (request) => {

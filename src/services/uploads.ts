@@ -4,7 +4,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { Uploads, Files, FileChunks, type UploadRow, type FileRow } from '../db/repo.ts';
+import { Uploads, Files, Folders, FileChunks, type UploadRow, type FileRow } from '../db/repo.ts';
 import { planChunks, sizeOfChunk, toRanges, missingChunks } from '../lib/chunking.ts';
 import { HashingPassThrough, fingerprintFromChunkHashes, hashesEqual } from '../lib/hash.ts';
 import { loadConfig } from '../config/env.ts';
@@ -44,15 +44,24 @@ export async function initUpload(input: {
   fingerprint?: string;
 }): Promise<InitResult> {
   const cfg = loadConfig();
-  if (!Number.isInteger(input.size) || input.size < 0) throw errors.badRequest('حجم الملف غير صالح.');
+  if (!Number.isSafeInteger(input.size) || input.size < 0) throw errors.badRequest('حجم الملف غير صالح.');
   if (cfg.upload.maxFileSize > 0 && input.size > cfg.upload.maxFileSize) {
     throw errors.payloadTooLarge('حجم الملف يتجاوز الحدّ الأقصى المسموح.');
   }
 
+  if (input.folderId !== null) {
+    const folder = await Folders.findById(input.folderId);
+    if (!folder || folder.user_id !== input.userId) throw errors.notFound('Destination folder not found.');
+  }
+  const name = sanitizeFileName(input.name);
   const existing = await Uploads.findByClientKey(input.userId, input.clientKey);
   if (existing) {
+    if (existing.user_id !== input.userId || existing.folder_id !== input.folderId || existing.name !== name || existing.size !== input.size || existing.fingerprint !== (input.fingerprint ?? null)) {
+      throw errors.conflict('clientKey was already used for different upload metadata.');
+    }
     if (existing.status === 'completed' && existing.file_id) {
       const file = await Files.findById(existing.file_id);
+      if (file && file.user_id !== input.userId) throw errors.notFound('Uploaded file not found.');
       return {
         uploadId: existing.id,
         chunkSize: existing.chunk_size,
@@ -71,6 +80,7 @@ export async function initUpload(input: {
         completed: false,
       };
     }
+    throw errors.conflict('The previous upload was aborted; use a new clientKey.');
   }
 
   const chunkSize = cfg.upload.chunkSize;
@@ -79,7 +89,7 @@ export async function initUpload(input: {
     user_id: input.userId,
     client_key: input.clientKey,
     folder_id: input.folderId,
-    name: sanitizeFileName(input.name),
+    name,
     mime: input.mime ?? null,
     size: input.size,
     chunk_size: chunkSize,

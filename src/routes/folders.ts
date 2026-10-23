@@ -3,24 +3,10 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { parse } from '../lib/validate.ts';
 import { errors } from '../lib/errors.ts';
-import { Folders, type FolderRow } from '../db/repo.ts';
-import { exec, tb } from '../db/pg.ts';
+import { Folders } from '../db/repo.ts';
 import { requireUser } from '../plugins/auth.ts';
-import { sanitizeFileName, normalizeVirtualPath } from '../lib/paths.ts';
-
-function toApiFolder(f: FolderRow): Record<string, unknown> {
-  return { id: f.id, name: f.name, parentId: f.parent_id, path: f.path, modified: f.updated_at };
-}
-
-async function uniqueFolderName(userId: string, parentId: string | null, desired: string): Promise<string> {
-  const safe = sanitizeFileName(desired);
-  if (!(await Folders.findByParentName(userId, parentId, safe))) return safe;
-  for (let i = 1; i < 10000; i++) {
-    const candidate = `${safe} (${i})`;
-    if (!(await Folders.findByParentName(userId, parentId, candidate))) return candidate;
-  }
-  return `${safe}-${Date.now()}`;
-}
+import { normalizeVirtualPath, sanitizeFileName } from '../lib/paths.ts';
+import { folderDetails, toApiFolder, updateDriveItem } from '../services/drive.ts';
 
 const createBody = z.object({
   name: z.string().min(1).max(200),
@@ -32,8 +18,11 @@ export default async function folderRoutes(app: FastifyInstance): Promise<void> 
     const user = requireUser(request);
     const parentId = (request.query as { parentId?: string }).parentId;
     const pid = parentId === undefined || parentId === 'root' || parentId === '' ? null : parentId;
+    if (pid) await folderDetails(user.id, pid);
     return { folders: (await Folders.listChildren(user.id, pid)).map(toApiFolder) };
   });
+
+  app.get('/api/folders/:id', async (request) => folderDetails(requireUser(request).id, (request.params as { id: string }).id));
 
   app.post('/api/folders', async (request) => {
     const user = requireUser(request);
@@ -45,31 +34,27 @@ export default async function folderRoutes(app: FastifyInstance): Promise<void> 
       if (!parent || parent.user_id !== user.id) throw errors.badRequest('المجلّد الأب غير موجود.');
       parentPath = parent.path;
     }
-    const name = await uniqueFolderName(user.id, parentId, body.name);
-    const path = normalizeVirtualPath(`${parentPath}/${name}`);
-    const folder = await Folders.create({ user_id: user.id, parent_id: parentId, name, path });
-    return { folder: toApiFolder(folder) };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const name = sanitizeFileName(body.name);
+      let path: string;
+      try { path = normalizeVirtualPath(`${parentPath}/${name}`); }
+      catch { throw errors.badRequest('Destination path exceeds the supported length.'); }
+      try {
+        const folder = await Folders.create({ user_id: user.id, parent_id: parentId, name, path });
+        return { folder: toApiFolder(folder) };
+      } catch (error) {
+        if ((error as { code?: string })?.code !== '23505') throw error;
+      }
+    }
+    throw errors.conflict('Destination changed concurrently; retry.');
   });
 
   app.patch('/api/folders/:id', async (request) => {
     const user = requireUser(request);
     const id = (request.params as { id: string }).id;
-    const body = parse(z.object({ name: z.string().min(1).max(200) }), request.body);
-    const folder = await Folders.findById(id);
-    if (!folder || folder.user_id !== user.id) throw errors.notFound('المجلّد غير موجود.');
-    const name = await uniqueFolderName(user.id, folder.parent_id, body.name);
-    const parentPath = folder.path.slice(0, folder.path.length - folder.name.length - 1) || '';
-    const newPath = normalizeVirtualPath(`${parentPath}/${name}`);
-    const oldPath = folder.path;
-
-    await Folders.rename(folder.id, name, newPath);
-    // حدّث مسارات الأحفاد
-    await exec(
-      `UPDATE ${tb('folders')} SET path = $1 || substr(path, $2::int + 1), updated_at = $3
-       WHERE user_id = $4 AND path LIKE $5 ESCAPE '\\'`,
-      [newPath, oldPath.length, Date.now(), user.id, `${oldPath.replace(/[%_]/g, (m) => '\\' + m)}/%`],
-    );
-    return { folder: toApiFolder((await Folders.findById(folder.id))!) };
+    const body = parse(z.object({ name: z.string().min(1).max(200).optional(), parentId: z.string().nullable().optional() }).strict(), request.body);
+    if (body.name === undefined && body.parentId === undefined) throw errors.badRequest('Provide name or parentId.');
+    return { folder: await updateDriveItem(user.id, { type: 'folder', id }, { name: body.name, destinationId: body.parentId }) };
   });
 
   app.delete('/api/folders/:id', async (request) => {

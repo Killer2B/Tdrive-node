@@ -5,6 +5,7 @@ export interface ToastMessage {
   type?: 'success' | 'info' | 'warning' | 'error';
   title: string;
   message?: string;
+  action?: { label: string; onClick: () => void };
 }
 
 interface ToastProps {
@@ -16,7 +17,7 @@ export const ToastContainer: React.FC<ToastProps> = ({ toasts, onDismiss }) => {
   if (toasts.length === 0) return null;
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 max-w-md w-full pointer-events-none">
+    <div aria-live="polite" className="fixed bottom-4 right-4 left-4 sm:left-auto z-[70] flex flex-col gap-2 sm:max-w-md pointer-events-none">
       {toasts.map((toast) => (
         <div
           key={toast.id}
@@ -35,9 +36,12 @@ export const ToastContainer: React.FC<ToastProps> = ({ toasts, onDismiss }) => {
               {toast.message && (
                 <p className="text-xs text-outline mt-0.5">{toast.message}</p>
               )}
+              {toast.action && <button type="button" onClick={toast.action.onClick} className="min-h-11 mt-1 text-sm font-semibold text-primary hover:underline">{toast.action.label}</button>}
             </div>
           </div>
           <button
+            type="button"
+            aria-label="Dismiss notification"
             onClick={() => onDismiss(toast.id)}
             className="text-outline hover:text-on-surface p-1 rounded hover:bg-surface-container-high transition-colors"
           >

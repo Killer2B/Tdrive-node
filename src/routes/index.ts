@@ -8,6 +8,7 @@ import authRoutes from './auth.ts';
 import publicRoutes from './public.ts';
 import fileRoutes from './files.ts';
 import folderRoutes from './folders.ts';
+import driveRoutes from './drive.ts';
 import uploadRoutes from './uploads.ts';
 import downloadRoutes from './downloads.ts';
 import eventRoutes from './events.ts';
@@ -43,6 +44,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     secured.addHook('preHandler', authGuard);
     await secured.register(fileRoutes);
     await secured.register(folderRoutes);
+    await secured.register(driveRoutes);
     await secured.register(uploadRoutes);
     await secured.register(downloadRoutes);
     await secured.register(eventRoutes);

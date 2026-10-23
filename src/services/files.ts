@@ -2,11 +2,11 @@
 import { stat, rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { Files, FileChunks, Settings, type FileRow, type FileType, type FileSource } from '../db/repo.ts';
+import { Files, Folders, FileChunks, Settings, type FileRow, type FileType, type FileSource } from '../db/repo.ts';
 import { query, tb } from '../db/pg.ts';
 import { getStorage } from '../storage/index.ts';
 import { sha256OfFile } from '../lib/hash.ts';
-import { sanitizeFileName, splitExt } from '../lib/paths.ts';
+import { splitExt } from '../lib/paths.ts';
 import { loadConfig } from '../config/env.ts';
 import { errors } from '../lib/errors.ts';
 import { getLogger } from '../lib/logger.ts';
@@ -15,6 +15,7 @@ import { newId } from '../lib/ids.ts';
 import { splitFileIntoChunks, createRangeStream, deleteCacheChunks } from './chunkstore.ts';
 import * as telegram from './telegram.ts';
 import { Activity } from './activity.ts';
+import { availableName } from '../lib/drive-names.ts';
 
 const TYPE_BY_EXT: Record<string, FileType> = {};
 const addTypes = (type: FileType, exts: string[]): void => {
@@ -59,14 +60,9 @@ export function isInlineSafe(mime: string): boolean {
 
 /** يولّد اسمًا فريدًا داخل المجلّد بإلحاق (1)/(2) عند التصادم (إصلاح L7). */
 export async function uniqueName(userId: string, folderId: string | null, desired: string): Promise<string> {
-  const safe = sanitizeFileName(desired);
-  if (!(await Files.findByFolderAndName(userId, folderId, safe))) return safe;
-  const { stem, ext } = splitExt(safe);
-  for (let i = 1; i < 10000; i++) {
-    const candidate = `${stem} (${i})${ext}`;
-    if (!(await Files.findByFolderAndName(userId, folderId, candidate))) return candidate;
-  }
-  return `${stem}-${newId()}${ext}`;
+  return availableName(desired, 'file', async (name) => !!(
+    await Files.findByFolderAndName(userId, folderId, name) || await Folders.findByParentName(userId, folderId, name)
+  ));
 }
 
 function storageKeyForUnused(): void {

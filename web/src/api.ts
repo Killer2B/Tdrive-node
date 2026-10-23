@@ -53,6 +53,26 @@ export interface ApiFolder {
   modified: number;
 }
 
+export interface DriveItem {
+  id: string;
+  type: 'file' | 'folder';
+  name: string;
+  parentId?: string | null;
+}
+
+export interface DrivePage {
+  files: ApiFile[];
+  folders: ApiFolder[];
+  breadcrumbs: ApiFolder[];
+  nextOffset: number | null;
+  total: number;
+}
+
+export type DriveResult = { type: 'file' | 'folder'; id: string } & (
+  { ok: true; item?: ApiFile | ApiFolder; coveredBy?: string } |
+  { ok: false; error: { code: string; message: string } }
+);
+
 export class ApiError extends Error {
   code: string;
   status: number;
@@ -125,6 +145,7 @@ export const files = {
   streamUrl: (id: string) => `/api/files/${id}/stream`,
   downloadUrl: (id: string) => `/api/files/${id}/download`,
   thumbUrl: (id: string) => `/api/files/${id}/thumbnail`,
+  get: (id: string) => req<{ file: ApiFile }>(`/api/files/${encodeURIComponent(id)}`),
 };
 
 export const folders = {
@@ -132,6 +153,21 @@ export const folders = {
     req<{ folders: ApiFolder[] }>(`/api/folders?parentId=${encodeURIComponent(parentId ?? 'root')}`),
   create: (name: string, parentId: string | null = null) =>
     req<{ folder: ApiFolder }>('/api/folders', { method: 'POST', body: JSON.stringify({ name, parentId }) }),
+  get: async (id: string, signal?: AbortSignal) => {
+    const details = await req<{ folder: ApiFolder; breadcrumbs: ApiFolder[] }>(`/api/folders/${encodeURIComponent(id)}`, { signal });
+    return { ...details, breadcrumbs: details.breadcrumbs.filter((folder) => folder.id !== 'root') };
+  },
+};
+
+export const drive = {
+  list: (params: { folderId?: string | null; q?: string; sort?: string; order?: string; limit?: number; offset?: number }, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    query.set('folderId', params.folderId ?? 'root');
+    for (const [key, value] of Object.entries(params)) if (key !== 'folderId' && value !== undefined && value !== '') query.set(key, String(value));
+    return req<DrivePage>(`/api/drive?${query}`, { signal });
+  },
+  operate: (payload: { action: 'rename' | 'move' | 'copy' | 'trash'; items: Pick<DriveItem, 'id' | 'type'>[]; destinationId?: string | null; name?: string }) =>
+    req<{ results: DriveResult[] }>('/api/drive/operations', { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 // ===== التحميل من الروابط =====
@@ -363,9 +399,9 @@ export function uploadFile(
   opts: { folderId?: string | null; onProgress?: (fraction: number, speed: string) => void } = {},
 ): UploadHandle {
   const controller = new AbortController();
-  const clientKey = `${opts.folderId ?? 'root'}:${file.size}:${file.lastModified}:${file.name}`.slice(0, 128).padEnd(8, '0');
-
   const run = async (): Promise<ApiFile> => {
+    const fingerprint = new TextEncoder().encode(JSON.stringify([opts.folderId ?? null, file.size, file.lastModified, file.name]));
+    const clientKey = `web_${await sha256Hex(fingerprint.buffer)}`;
     const init = await req<{
       uploadId: string;
       chunkSize: number;
@@ -375,6 +411,7 @@ export function uploadFile(
       file?: ApiFile;
     }>('/api/uploads/init', {
       method: 'POST',
+      signal: controller.signal,
       body: JSON.stringify({ clientKey, name: file.name, size: file.size, folderId: opts.folderId ?? null }),
     });
 
@@ -395,7 +432,7 @@ export function uploadFile(
       const buf = await blob.arrayBuffer();
       const sha = await sha256Hex(buf);
 
-      const res = await fetch(`/api/uploads/${uploadId}/parts/${idx}`, {
+      const res = await fetch(apiUrl(`/api/uploads/${uploadId}/parts/${idx}`), {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/octet-stream', 'x-chunk-sha256': sha },
@@ -413,7 +450,7 @@ export function uploadFile(
       opts.onProgress?.(doneChunks / totalChunks, speed);
     }
 
-    const done = await req<{ file: ApiFile }>(`/api/uploads/${uploadId}/complete`, { method: 'POST' });
+    const done = await req<{ file: ApiFile }>(`/api/uploads/${uploadId}/complete`, { method: 'POST', signal: controller.signal });
     opts.onProgress?.(1, '');
     return done.file;
   };

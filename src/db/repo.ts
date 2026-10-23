@@ -2,8 +2,11 @@
  * طبقة الوصول للبيانات (repositories) فوق Postgres/Supabase.
  * كل الدوال غير متزامنة (async) وتعمل على مخطّط `tdrive` المُنشأ عبر Supabase MCP.
  */
-import { exec, one, query, scalar, tb } from './pg.ts';
+import { exec, one, query, scalar, tb, withTransaction, type DbExecutor } from './pg.ts';
 import { newId } from '../lib/ids.ts';
+import { availableName } from '../lib/drive-names.ts';
+import { errors } from '../lib/errors.ts';
+import { normalizeVirtualPath, splitExt } from '../lib/paths.ts';
 
 const now = (): number => Date.now();
 const bool = (v: boolean | undefined): number => (v ? 1 : 0);
@@ -252,10 +255,34 @@ export const Sessions = {
 };
 
 // ===== المجلّدات =====
+export async function allocateDriveName(client: DbExecutor, userId: string, parentId: string | null, desired: string, type: 'file' | 'folder', excludeId = ''): Promise<string> {
+  return availableName(desired, type, async (name) => {
+    const result = await client.query(`SELECT id FROM ${tb('folders')} WHERE user_id = $1 AND COALESCE(parent_id, '') = COALESCE($2::text, '') AND name = $3 AND id <> $4
+      UNION ALL SELECT id FROM ${tb('files')} WHERE user_id = $1 AND COALESCE(folder_id, '') = COALESCE($2::text, '') AND name = $3 AND trashed = 0 AND id <> $4 LIMIT 1`, [userId, parentId, name, excludeId]);
+    return result.rows.length > 0;
+  });
+}
+
+async function lockCreateParent(client: DbExecutor, userId: string, parentId: string | null): Promise<FolderRow | null> {
+  await client.query(`SELECT id FROM ${tb('users')} WHERE id = $1 FOR UPDATE`, [userId]);
+  if (parentId === null) return null;
+  const parent = (await client.query<FolderRow>(`SELECT * FROM ${tb('folders')} WHERE user_id = $1 AND id = $2`, [userId, parentId])).rows[0];
+  if (!parent) throw errors.notFound('Destination folder not found.');
+  return parent;
+}
+
 export const Folders = {
-  async create(input: { user_id: string; parent_id: string | null; name: string; path: string }): Promise<FolderRow> {
+  async create(input: { user_id: string; parent_id: string | null; name: string; path: string; id?: string }, client?: DbExecutor): Promise<FolderRow> {
+    if (!client) return withTransaction(async (transaction) => {
+      const parent = await lockCreateParent(transaction, input.user_id, input.parent_id);
+      const name = await allocateDriveName(transaction, input.user_id, input.parent_id, input.name, 'folder');
+      let path: string;
+      try { path = normalizeVirtualPath(`${parent?.path ?? ''}/${name}`); }
+      catch { throw errors.badRequest('Destination path exceeds the supported length.'); }
+      return Folders.create({ ...input, name, path }, transaction);
+    });
     const row: FolderRow = {
-      id: newId('fld'),
+      id: input.id ?? newId('fld'),
       user_id: input.user_id,
       parent_id: input.parent_id,
       name: input.name,
@@ -263,8 +290,8 @@ export const Folders = {
       created_at: now(),
       updated_at: now(),
     };
-    await exec(
-      `INSERT INTO ${tb('folders')} (id, user_id, parent_id, name, path, created_at, updated_at)
+    await client.query(
+       `INSERT INTO ${tb('folders')} (id, user_id, parent_id, name, path, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [row.id, row.user_id, row.parent_id, row.name, row.path, row.created_at, row.updated_at],
     );
@@ -323,7 +350,12 @@ const SORT_COLUMN: Record<NonNullable<FileListOptions['sort']>, string> = {
 };
 
 export const Files = {
-  async create(input: Partial<FileRow> & { user_id: string; name: string }): Promise<FileRow> {
+  async create(input: Partial<FileRow> & { user_id: string; name: string }, client?: DbExecutor): Promise<FileRow> {
+    if (!client) return withTransaction(async (transaction) => {
+      await lockCreateParent(transaction, input.user_id, input.folder_id ?? null);
+      const name = input.trashed ? input.name : await allocateDriveName(transaction, input.user_id, input.folder_id ?? null, input.name, 'file');
+      return Files.create({ ...input, name, ext: splitExt(name).ext.slice(1).toLowerCase() || null }, transaction);
+    });
     const ts = now();
     const row: FileRow = {
       id: input.id ?? newId('fil'),
@@ -354,8 +386,8 @@ export const Files = {
       created_at: input.created_at ?? ts,
       updated_at: input.updated_at ?? ts,
     };
-    await exec(
-      `INSERT INTO ${tb('files')} (id,user_id,folder_id,name,ext,type,mime,size,storage_key,sha256,status,source,source_url,
+    await client.query(
+       `INSERT INTO ${tb('files')} (id,user_id,folder_id,name,ext,type,mime,size,storage_key,sha256,status,source,source_url,
           thumb_key,duration,width,height,starred,pinned,trashed,trashed_at,backend,chunk_size,thumb_tg_file_id,
           thumb_tg_message_id,created_at,updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)`,

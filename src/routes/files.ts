@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { parse } from '../lib/validate.ts';
 import { errors } from '../lib/errors.ts';
-import { Files, Folders, type FileRow } from '../db/repo.ts';
+import { Files, type FileRow } from '../db/repo.ts';
 import { requireUser } from '../plugins/auth.ts';
 import { serveFileRange } from './_serve.ts';
 import {
@@ -13,10 +13,10 @@ import {
   restoreFile,
   deleteFilePermanent,
   storageUsage,
-  uniqueName,
   purgeExpiredTrash,
 } from '../services/files.ts';
 import { Activity } from '../services/activity.ts';
+import { updateDriveItem } from '../services/drive.ts';
 
 async function ownFile(request: FastifyRequest, id: string): Promise<FileRow> {
   const user = requireUser(request);
@@ -35,7 +35,7 @@ const listQuery = z.object({
 });
 
 const patchBody = z.object({
-  name: z.string().min(1).max(256).optional(),
+  name: z.string().min(1).max(200).optional(),
   starred: z.boolean().optional(),
   pinned: z.boolean().optional(),
   folderId: z.string().nullable().optional(),
@@ -69,16 +69,8 @@ export default async function fileRoutes(app: FastifyInstance): Promise<void> {
     const patch: Partial<FileRow> = {};
     if (body.starred !== undefined) patch.starred = body.starred ? 1 : 0;
     if (body.pinned !== undefined) patch.pinned = body.pinned ? 1 : 0;
-    if (body.folderId !== undefined) {
-      if (body.folderId !== null) {
-        const folder = await Folders.findById(body.folderId);
-        if (!folder || folder.user_id !== user.id) throw errors.badRequest('المجلّد الوجهة غير موجود.');
-      }
-      patch.folder_id = body.folderId;
-    }
-    if (body.name !== undefined) {
-      const targetFolder = body.folderId !== undefined ? body.folderId : file.folder_id;
-      patch.name = await uniqueName(user.id, targetFolder, body.name);
+    if (body.name !== undefined || body.folderId !== undefined) {
+      await updateDriveItem(user.id, { type: 'file', id: file.id }, { name: body.name, destinationId: body.folderId });
     }
     await Files.update(file.id, patch);
     if (body.starred !== undefined || body.pinned !== undefined || body.name !== undefined || body.folderId !== undefined) {

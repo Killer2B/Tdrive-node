@@ -14,7 +14,6 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenCommandPalette,
   viewLayout,
   onToggleViewLayout,
-  onFilterClick,
   username,
   notifications,
 }) => {
@@ -27,60 +26,27 @@ export const Header: React.FC<HeaderProps> = ({
         <button type="button" onClick={onOpenCommandPalette} aria-label="Open navigation and search" className="md:hidden shrink-0 min-h-11 min-w-11 rounded-lg text-primary hover:bg-surface-container"><span aria-hidden="true" className="material-symbols-outlined">menu</span></button>
         {/* Omnisearch Bar */}
         <div className="flex-1 min-w-0 max-w-xl">
-          <div
+          <button type="button"
             onClick={onOpenCommandPalette}
-            className="relative flex items-center cursor-pointer group"
+            aria-label="Quick search and navigation"
+            className="relative flex min-h-11 w-full min-w-0 items-center gap-2 rounded-lg border border-white/5 bg-surface-container-low px-3 text-left text-sm text-on-surface-variant hover:bg-surface-container focus-visible:outline-2 focus-visible:outline-primary"
           >
-            <span className="material-symbols-outlined absolute left-3.5 text-outline text-lg group-hover:text-primary transition-colors">
+            <span aria-hidden="true" className="material-symbols-outlined shrink-0 text-outline text-lg">
               search
             </span>
-            <input
-              type="text"
-              readOnly
-              placeholder="Search files by name, type, or checksum..."
-              className="w-full bg-surface-container-low text-on-surface placeholder:text-outline font-sans text-sm pl-10 pr-20 py-2 rounded-lg border border-white/5 group-hover:border-white/10 group-hover:bg-surface-container transition-all cursor-pointer"
-            />
-            <div className="absolute right-2.5 flex items-center gap-1">
-              <kbd className="font-mono text-[11px] px-1.5 py-0.5 bg-surface-container-highest text-on-surface-variant rounded border border-white/10">
-                ⌘K
-              </kbd>
-            </div>
-          </div>
+            <span className="min-w-0 flex-1 truncate">Quick search & navigation</span>
+            <kbd aria-hidden="true" className="hidden shrink-0 rounded border border-white/10 bg-surface-container-highest px-1.5 py-0.5 font-mono text-xs sm:block">Ctrl / Cmd+K</kbd>
+          </button>
         </div>
 
         {/* Right Controls */}
         <div className="flex items-center gap-1 sm:gap-3">
-          {/* Filter options */}
-          <div className="hidden xl:flex items-center gap-1 bg-surface-container-low p-0.5 rounded-lg border border-white/5">
-            <button
-              type="button"
-              onClick={() => onFilterClick && onFilterClick('Type')}
-              className="px-2.5 py-1 font-mono text-xs rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-colors"
-            >
-              Type
-            </button>
-            <button
-              type="button"
-              onClick={() => onFilterClick && onFilterClick('People')}
-              className="px-2.5 py-1 font-mono text-xs rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-colors"
-            >
-              Shares
-            </button>
-            <button
-              type="button"
-              onClick={() => onFilterClick && onFilterClick('Modified')}
-              className="px-2.5 py-1 font-mono text-xs rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container transition-colors"
-            >
-              Modified
-            </button>
-          </div>
-
           <div className="h-4 w-px bg-surface-container-highest hidden md:block"></div>
 
           {/* Authenticated session status */}
           <div className="hidden lg:flex items-center gap-1.5 font-mono text-xs text-outline">
             <span className="w-2 h-2 rounded-full bg-secondary-fixed-dim"></span>
-            <span>Authenticated session</span>
+            <span>Signed in</span>
           </div>
 
           <div className="h-4 w-px bg-surface-container-highest hidden lg:block"></div>
@@ -91,25 +57,29 @@ export const Header: React.FC<HeaderProps> = ({
               type="button"
               onClick={() => onToggleViewLayout('grid')}
               title="Grid view"
-              className={`p-1.5 rounded transition-colors ${
+              aria-label="Grid view"
+              aria-pressed={viewLayout === 'grid'}
+              className={`min-h-11 min-w-11 flex items-center justify-center rounded transition-colors focus-visible:outline-2 focus-visible:outline-primary ${
                 viewLayout === 'grid'
                   ? 'text-on-surface bg-surface-container-high'
                   : 'text-on-surface-variant hover:text-on-surface'
               }`}
             >
-              <span className="material-symbols-outlined text-lg">grid_view</span>
+              <span aria-hidden="true" className="material-symbols-outlined text-lg">grid_view</span>
             </button>
             <button
               type="button"
               onClick={() => onToggleViewLayout('list')}
               title="List view"
-              className={`p-1.5 rounded transition-colors ${
+              aria-label="List view"
+              aria-pressed={viewLayout === 'list'}
+              className={`min-h-11 min-w-11 flex items-center justify-center rounded transition-colors focus-visible:outline-2 focus-visible:outline-primary ${
                 viewLayout === 'list'
                   ? 'text-on-surface bg-surface-container-high'
                   : 'text-on-surface-variant hover:text-on-surface'
               }`}
             >
-              <span className="material-symbols-outlined text-lg">view_headline</span>
+              <span aria-hidden="true" className="material-symbols-outlined text-lg">view_headline</span>
             </button>
           </div>
 
@@ -118,9 +88,11 @@ export const Header: React.FC<HeaderProps> = ({
             <button
               type="button"
               onClick={() => setShowNotifications(!showNotifications)}
-              className="relative p-2 rounded-lg bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors border border-white/5"
+              aria-label="Recent activity"
+              aria-expanded={showNotifications}
+              className="relative min-h-11 min-w-11 rounded-lg bg-surface-container-low hover:bg-surface-container text-on-surface-variant hover:text-on-surface transition-colors border border-white/5 focus-visible:outline-2 focus-visible:outline-primary"
             >
-              <span className="material-symbols-outlined text-lg">notifications</span>
+              <span aria-hidden="true" className="material-symbols-outlined text-lg">notifications</span>
               {notifications.length > 0 && (
                 <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-primary-container animate-pulse"></span>
               )}
@@ -129,7 +101,7 @@ export const Header: React.FC<HeaderProps> = ({
             {showNotifications && (
               <div className="absolute right-0 top-11 w-80 rounded-xl bg-surface-container border border-white/10 shadow-2xl p-3 z-50 animate-in fade-in duration-150">
                 <div className="flex items-center justify-between pb-2 border-b border-white/5">
-                  <span className="font-mono text-xs text-on-surface uppercase font-semibold">Security Alerts</span>
+                   <span className="text-sm text-on-surface font-semibold">Recent activity</span>
                   <button
                     type="button"
                     onClick={() => setShowNotifications(false)}

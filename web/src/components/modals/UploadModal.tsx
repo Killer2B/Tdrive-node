@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import * as api from '../../api';
 import { ToastMessage } from '../Toast';
 
@@ -7,15 +7,20 @@ interface UploadModalProps {
   onClose: () => void;
   folderId: string | null;
   folderName: string;
+  initialFiles?: File[];
+  onInitialFilesHandled?: () => void;
   onUploaded: () => void;
   onToast: (title: string, message?: string, type?: ToastMessage['type']) => void;
 }
 
 interface UploadItem {
+  id: string;
+  file: File;
+  folderId: string | null;
   name: string;
   progress: number;
   speed: string;
-  status: 'uploading' | 'done' | 'error';
+  status: 'queued' | 'uploading' | 'done' | 'error' | 'canceled';
   error?: string;
 }
 
@@ -28,11 +33,14 @@ function fmtDuration(sec?: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`;
 }
 
-export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folderId, folderName, onUploaded, onToast }) => {
+export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folderId, folderName, onUploaded, onToast, initialFiles, onInitialFilesHandled }) => {
   const [activeTab, setActiveTab] = useState<'browse' | 'remote'>('browse');
   const [isDragging, setIsDragging] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const pendingRef = useRef<UploadItem[]>([]);
+  const activeRef = useRef(new Map<string, api.UploadHandle>());
 
   // الرابط
   const [url, setUrl] = useState('');
@@ -42,32 +50,60 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
   const [formatId, setFormatId] = useState<string>('best');
   const [enqueuing, setEnqueuing] = useState(false);
 
-  if (!isOpen) return null;
-
-  const handleNativeFiles = (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return;
-    Array.from(fileList).forEach((file) => {
-      const item: UploadItem = { name: file.name, progress: 0, speed: '', status: 'uploading' };
-      setUploads((prev) => [item, ...prev]);
-      const update = (patch: Partial<UploadItem>) =>
-        setUploads((prev) => prev.map((u) => (u === item || u.name === item.name ? { ...u, ...patch } : u)));
-
-      const { promise } = api.uploadFile(file, {
-        folderId,
-        onProgress: (frac, speed) => update({ progress: Math.round(frac * 100), speed }),
+  const updateUpload = (id: string, patch: Partial<UploadItem>) => setUploads((items) => items.map((item) => item.id === id ? { ...item, ...patch } : item));
+  const pumpUploads = () => {
+    while (activeRef.current.size < 2 && pendingRef.current.length) {
+      const item = pendingRef.current.shift()!;
+      updateUpload(item.id, { status: 'uploading', error: undefined });
+      const handle = api.uploadFile(item.file, {
+        folderId: item.folderId,
+        onProgress: (fraction, speed) => updateUpload(item.id, { progress: Math.round(fraction * 100), speed }),
       });
-      promise
-        .then(() => {
-          update({ progress: 100, status: 'done' });
-          onToast('اكتمل الرفع', file.name);
-          onUploaded();
+      activeRef.current.set(item.id, handle);
+      handle.promise
+        .then(() => { updateUpload(item.id, { progress: 100, status: 'done' }); onUploaded(); })
+        .catch((error: unknown) => {
+          const canceled = error instanceof Error && (error.name === 'AbortError' || (error instanceof api.ApiError && error.code === 'Canceled'));
+          updateUpload(item.id, { status: canceled ? 'canceled' : 'error', error: canceled ? undefined : error instanceof Error ? error.message : 'فشل الرفع' });
         })
-        .catch((e: unknown) => {
-          update({ status: 'error', error: e instanceof Error ? e.message : 'فشل الرفع' });
-          onToast('فشل الرفع', file.name, 'error');
-        });
-    });
+        .finally(() => { activeRef.current.delete(item.id); pumpUploads(); });
+    }
   };
+  const handleNativeFiles = (fileList: FileList | File[] | null) => {
+    if (!fileList?.length) return;
+    const items: UploadItem[] = Array.from(fileList).map((file) => ({ id: crypto.randomUUID(), file, folderId, name: file.name, progress: 0, speed: '', status: 'queued' }));
+    setUploads((previous) => [...items, ...previous]); pendingRef.current.push(...items); pumpUploads();
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+  const cancelUpload = (item: UploadItem) => {
+    pendingRef.current = pendingRef.current.filter((queued) => queued.id !== item.id);
+    activeRef.current.get(item.id)?.cancel(); updateUpload(item.id, { status: 'canceled' });
+  };
+  const retryUpload = (item: UploadItem) => {
+    const retry = { ...item, progress: 0, speed: '', status: 'queued' as const, error: undefined };
+    updateUpload(item.id, retry); pendingRef.current.push(retry); pumpUploads();
+  };
+  useEffect(() => {
+    if (isOpen && initialFiles?.length) { handleNativeFiles(initialFiles); onInitialFilesHandled?.(); }
+  }, [isOpen, initialFiles]);
+  useEffect(() => {
+    if (!isOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    dialogRef.current?.focus();
+    const keyboard = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.stopPropagation(); onClose(); }
+      if (event.key !== 'Tab') return;
+      const controls = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),[tabindex="0"]') ?? [])].filter((element) => element.offsetParent !== null);
+      const first = controls[0], last = controls.at(-1);
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    dialogRef.current?.addEventListener('keydown', keyboard);
+    return () => { dialogRef.current?.removeEventListener('keydown', keyboard); previous?.focus(); };
+  }, [isOpen]);
+  useEffect(() => () => { pendingRef.current = []; for (const handle of activeRef.current.values()) handle.cancel(); }, []);
+
+  if (!isOpen) return null;
 
   const runProbe = async () => {
     if (!url.trim()) return;
@@ -119,19 +155,19 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
 
   return (
     <div className="fixed inset-0 bg-background/80 backdrop-blur-md z-50 flex items-center justify-center p-4 animate-in fade-in duration-200" dir="rtl">
-      <div className="w-full max-w-xl bg-surface-container-low border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+      <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="upload-title" className="w-full max-w-xl max-h-[90vh] overflow-y-auto bg-surface-container-low border border-white/10 rounded-2xl shadow-2xl flex flex-col outline-none">
         <div className="p-5 bg-surface-container flex items-center justify-between border-b border-white/5">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-primary-container text-on-primary-container flex items-center justify-center shadow-md">
               <span className="material-symbols-outlined text-xl">cloud_upload</span>
             </div>
             <div>
-              <h3 className="text-lg font-semibold text-on-surface">إضافة ملفّات</h3>
+              <h3 id="upload-title" className="text-lg font-semibold text-on-surface">إضافة ملفّات</h3>
               <p className="font-mono text-xs text-outline">رفع مجزّأ قابل للاستئناف · أو تحميل من رابط</p>
               <p className="font-mono text-xs text-primary mt-1 break-all" dir="ltr">Destination: {folderName}</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-surface-container-high text-outline hover:text-on-surface transition-colors">
+          <button type="button" aria-label="Close upload dialog" onClick={onClose} className="min-h-11 min-w-11 rounded-lg hover:bg-surface-container-high text-outline hover:text-on-surface transition-colors">
             <span className="material-symbols-outlined text-xl">close</span>
           </button>
         </div>
@@ -159,8 +195,10 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
                   setIsDragging(false);
                   handleNativeFiles(e.dataTransfer.files);
                 }}
+                role="button" tabIndex={0} aria-label="Select files to upload"
                 onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
+                onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); fileInputRef.current?.click(); } }}
+                className={`border-2 border-dashed rounded-xl p-8 flex flex-col items-center justify-center text-center cursor-pointer focus-visible:outline focus-visible:outline-primary transition-colors ${
                   isDragging ? 'border-primary bg-primary-container/10 scale-[0.99]' : 'border-white/10 hover:border-primary-container/60 hover:bg-surface-container'
                 }`}
               >
@@ -170,18 +208,18 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
                 </div>
                 <h4 className="text-base font-semibold text-on-surface">اسحب الملفّات هنا أو انقر للاختيار</h4>
                 <p className="text-xs text-outline mt-1 max-w-sm">
-                  رفع مجزّأ (18MB لكل جزء) مع التحقّق بـ SHA-256 واستئناف تلقائيّ عند انقطاع الاتصال. لا حدّ على حجم الملف.
+                  رفع قابل للاستئناف مع التحقق من الأجزاء. عند انقطاع الاتصال اضغط إعادة المحاولة لإكمال الأجزاء الناقصة.
                 </p>
               </div>
 
               {uploads.length > 0 && (
                 <div className="mt-4 space-y-2 max-h-52 overflow-y-auto">
-                  {uploads.map((u, i) => (
-                    <div key={i} className="p-3 rounded-lg bg-surface-container border border-white/5">
+                  {uploads.map((u) => (
+                    <div key={u.id} className="p-3 rounded-lg bg-surface-container border border-white/5">
                       <div className="flex items-center justify-between text-xs mb-1.5">
                         <span className="text-on-surface truncate max-w-[70%]">{u.name}</span>
                         <span className={`font-mono ${u.status === 'error' ? 'text-error' : u.status === 'done' ? 'text-secondary-fixed' : 'text-outline'}`}>
-                          {u.status === 'error' ? 'خطأ' : u.status === 'done' ? 'اكتمل' : `${u.progress}% · ${u.speed}`}
+                          {u.status === 'error' ? 'خطأ' : u.status === 'done' ? 'اكتمل' : u.status === 'queued' ? 'بانتظار الرفع' : u.status === 'canceled' ? 'أُلغي' : `${u.progress}% · ${u.speed}`}
                         </span>
                       </div>
                       <div className="h-1.5 rounded-full bg-surface-container-lowest overflow-hidden">
@@ -191,6 +229,10 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
                         />
                       </div>
                       {u.error && <p className="text-[11px] text-error mt-1">{u.error}</p>}
+                      <div className="flex gap-2 mt-1">
+                        {(u.status === 'queued' || u.status === 'uploading') && <button type="button" onClick={() => cancelUpload(u)} className="min-h-11 text-xs text-error underline">إلغاء</button>}
+                        {(u.status === 'error' || u.status === 'canceled') && <button type="button" onClick={() => retryUpload(u)} className="min-h-11 text-xs text-primary underline">إعادة المحاولة</button>}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -201,7 +243,7 @@ export const UploadModal: React.FC<UploadModalProps> = ({ isOpen, onClose, folde
           {activeTab === 'remote' && (
             <div className="space-y-4">
               <div className="flex gap-2">
-                <input
+                  <input aria-label="Download URL"
                   type="url"
                   value={url}
                   onChange={(e) => setUrl(e.target.value)}

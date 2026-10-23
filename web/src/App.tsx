@@ -36,7 +36,7 @@ export default function App() {
   const [authState, setAuthState] = useState<AuthState>('checking');
   const [username, setUsername] = useState('المالك');
 
-  const [currentView, setCurrentView] = useState<ViewMode>('overview');
+  const [currentView, setCurrentView] = useState<ViewMode>('all-files');
   const [files, setFiles] = useState<FileItem[]>([]);
   const [trashItems, setTrashItems] = useState<FileItem[]>([]);
   const [sharedVaults, setSharedVaults] = useState<api.ApiVault[]>([]);
@@ -53,11 +53,23 @@ export default function App() {
   const [filesError, setFilesError] = useState<string | null>(null);
   const [folderPath, setFolderPath] = useState<api.ApiFolder[]>([]);
   const [childFolders, setChildFolders] = useState<api.ApiFolder[]>([]);
+  const [explorerFiles, setExplorerFiles] = useState<FileItem[]>([]);
+  const [explorerError, setExplorerError] = useState<string | null>(null);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [explorerTotal, setExplorerTotal] = useState(0);
+  const [search, setSearch] = useState(() => new URLSearchParams(window.location.search).get('q') ?? '');
+  const [settledSearch, setSettledSearch] = useState(search);
+  const [sortBy, setSortBy] = useState<'name' | 'modified' | 'size'>('name');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
+  const [clipboard, setClipboard] = useState<{ mode: 'move' | 'copy'; items: api.DriveItem[] } | null>(null);
+  const [droppedFiles, setDroppedFiles] = useState<File[]>([]);
+  const pageCacheRef = useRef(new Map<string, api.DrivePage>());
+  const pageRequestRef = useRef(0);
+  const nextPageRef = useRef<AbortController | null>(null);
   const [foldersLoading, setFoldersLoading] = useState(false);
   const [foldersError, setFoldersError] = useState<string | null>(null);
   const [folderRevision, setFolderRevision] = useState(0);
   const [fileSelectionRevision, setFileSelectionRevision] = useState(0);
-  const folderPathsRef = useRef(new Map<string, api.ApiFolder[]>());
   const folderNavigationRef = useRef(0);
   const currentFolder = folderPath.at(-1);
   const currentFolderId = currentFolder?.id ?? null;
@@ -79,10 +91,10 @@ export default function App() {
   const jobsRef = useRef<Map<string, api.ApiJob>>(new Map());
 
   const addToast = useCallback(
-    (title: string, message?: string, type: ToastMessage['type'] = 'success') => {
+    (title: string, message?: string, type: ToastMessage['type'] = 'success', action?: ToastMessage['action']) => {
       const id = `toast-${crypto.randomUUID()}`;
-      setToasts((prev) => [...prev, { id, title, message, type }]);
-      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000);
+      setToasts((prev) => [...prev, { id, title, message, type, action }]);
+      setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), action ? 12_000 : 5000);
     },
     [],
   );
@@ -101,10 +113,12 @@ export default function App() {
   const reloadFiles = useCallback(async () => {
     setFilesLoading(true);
     try {
-      const [all, trash] = await Promise.all([api.files.list({ view: 'all' }), api.files.list({ view: 'trash' })]);
-      setFiles(all.files.map((f) => api.toFileItem(f, overviewStats?.retentionDays)));
+      const [recent, starred, trash] = await Promise.all([
+        api.files.list({ view: 'recent' }), api.files.list({ view: 'starred' }), api.files.list({ view: 'trash' }),
+      ]);
+      setFiles([...new Map([...recent.files, ...starred.files].map((file) => [file.id, api.toFileItem(file, overviewStats?.retentionDays)])).values()]);
       setTrashItems(trash.files.map((f) => api.toFileItem(f, overviewStats?.retentionDays)));
-      const usedTB = all.usage.usedBytes / 1e12;
+      const usedTB = recent.usage.usedBytes / 1e12;
       setStorageUsedTB(Number(usedTB.toFixed(3)));
       setFilesError(null);
       setDashboardError(null);
@@ -166,29 +180,87 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const expireSession = () => setAuthState('out');
+    const expireSession = () => {
+      setAuthState('out');
+      setFiles([]); setExplorerFiles([]); setChildFolders([]); setClipboard(null);
+      nextPageRef.current?.abort();
+      pageCacheRef.current.clear();
+    };
     window.addEventListener('tdrive:unauthorized', expireSession);
     return () => window.removeEventListener('tdrive:unauthorized', expireSession);
   }, []);
 
   useEffect(() => {
+    const timeout = setTimeout(() => setSettledSearch(search.trim()), 250);
+    return () => clearTimeout(timeout);
+  }, [search]);
+
+  useEffect(() => {
     if (authState !== 'in') return;
     let active = true;
-    setFoldersLoading(true);
-    setFoldersError(null);
-    setChildFolders([]);
-    api.folders.list(currentFolderId)
-      .then(({ folders }) => {
-        if (!active) return;
-        setChildFolders(folders);
-        for (const folder of folders) folderPathsRef.current.set(folder.id, [...folderPath, folder]);
+    const restoreLocation = async () => {
+      const navigation = ++folderNavigationRef.current;
+      const params = new URLSearchParams(window.location.search);
+      const folderId = params.get('folder');
+      setSearch(params.get('q') ?? '');
+      try {
+        const path = folderId ? (await api.folders.get(folderId)).breadcrumbs : [];
+        if (!active || navigation !== folderNavigationRef.current) return;
+        setFolderPath(path); setCurrentView('all-files'); setSelectedFile(null);
+      } catch (error) {
+        if (active && navigation === folderNavigationRef.current) { setFolderPath([]); addToast('تعذّر فتح المجلد', error instanceof Error ? error.message : undefined, 'error'); }
+      }
+    };
+    void restoreLocation();
+    window.addEventListener('popstate', restoreLocation);
+    return () => { active = false; window.removeEventListener('popstate', restoreLocation); };
+  }, [authState, addToast]);
+
+  useEffect(() => {
+    if (authState !== 'in' || currentView !== 'all-files') return;
+    const controller = new AbortController();
+    const request = ++pageRequestRef.current;
+    nextPageRef.current?.abort();
+    const key = JSON.stringify([currentFolderId, settledSearch, sortBy, sortOrder]);
+    const cached = pageCacheRef.current.get(key);
+    const showPage = (page: api.DrivePage) => {
+      setExplorerFiles(page.files.map((file) => api.toFileItem(file)));
+      setChildFolders(page.folders); setNextOffset(page.nextOffset); setExplorerTotal(page.total);
+      setFolderPath(page.breadcrumbs.filter((folder) => folder.id !== 'root'));
+    };
+    if (cached) showPage(cached);
+    else { setExplorerFiles([]); setChildFolders([]); setNextOffset(null); }
+    setFoldersLoading(true); setFoldersError(null); setExplorerError(null);
+    api.drive.list({ folderId: currentFolderId, q: settledSearch, sort: sortBy, order: sortOrder, limit: 100, offset: 0 }, controller.signal)
+      .then((page) => {
+        if (request !== pageRequestRef.current || controller.signal.aborted) return;
+        if (pageCacheRef.current.size >= 40) pageCacheRef.current.delete(pageCacheRef.current.keys().next().value!);
+        pageCacheRef.current.set(key, page); showPage(page);
       })
       .catch((error: unknown) => {
-        if (active) setFoldersError(error instanceof Error ? error.message : 'Unable to load folders.');
+        if (!controller.signal.aborted && request === pageRequestRef.current) setExplorerError(error instanceof Error ? error.message : 'Unable to load this folder.');
       })
-      .finally(() => { if (active) setFoldersLoading(false); });
-    return () => { active = false; };
-  }, [authState, folderPath, currentFolderId, folderRevision]);
+      .finally(() => { if (request === pageRequestRef.current && !controller.signal.aborted) setFoldersLoading(false); });
+    return () => { controller.abort(); nextPageRef.current?.abort(); };
+  }, [authState, currentView, currentFolderId, settledSearch, sortBy, sortOrder, folderRevision]);
+
+  const loadMore = async () => {
+    if (nextOffset === null || foldersLoading) return;
+    const controller = new AbortController(); nextPageRef.current = controller;
+    const request = pageRequestRef.current;
+    setFoldersLoading(true);
+    try {
+      const page = await api.drive.list({ folderId: currentFolderId, q: settledSearch, sort: sortBy, order: sortOrder, limit: 100, offset: nextOffset }, controller.signal);
+      if (request !== pageRequestRef.current || controller.signal.aborted) return;
+      setExplorerFiles((items) => [...new Map([...items, ...page.files.map((file) => api.toFileItem(file))].map((file) => [file.id, file])).values()]);
+      setChildFolders((items) => [...new Map([...items, ...page.folders].map((folder) => [folder.id, folder])).values()]);
+      setNextOffset(page.nextOffset); setExplorerTotal(page.total); setExplorerError(null);
+    } catch (error) {
+      if (!controller.signal.aborted) setExplorerError(error instanceof Error ? error.message : 'Unable to load more files.');
+    } finally { if (request === pageRequestRef.current && !controller.signal.aborted) setFoldersLoading(false); }
+  };
+
+  const refreshDrive = () => { pageCacheRef.current.clear(); setFolderRevision((revision) => revision + 1); };
 
   // بعد الدخول: حمّل الملفّات والمهام واشترك في SSE
   useEffect(() => {
@@ -210,7 +282,7 @@ export default function App() {
       refreshTransfers();
       if (job.status === 'done' && prev?.status !== 'done') {
         addToast('اكتمل التحميل', job.name, 'success');
-        void reloadFiles();
+        refreshDrive(); void reloadFiles().catch(() => {});
       } else if (job.status === 'error' && prev?.status !== 'error') {
         addToast('فشل التحميل', job.error ?? job.name, 'error');
       }
@@ -223,46 +295,74 @@ export default function App() {
     setFolderPath(path);
     setSelectedFile(null);
     setCurrentView('all-files');
+    setSearch('');
+    const url = new URL(window.location.href);
+    url.searchParams.delete('q');
+    if (path.length) url.searchParams.set('folder', path.at(-1)!.id); else url.searchParams.delete('folder');
+    window.history.pushState(null, '', `${url.pathname}${url.search}`);
   };
 
   const handleCreateFolder = async (name: string) => {
     const { folder } = await api.folders.create(name, currentFolderId);
-    folderPathsRef.current.set(folder.id, [...folderPath, folder]);
-    setFolderRevision((revision) => revision + 1);
+    refreshDrive();
     addToast('Folder created', folder.name);
   };
 
   const openFileLocation = async (file: FileItem) => {
     const navigation = ++folderNavigationRef.current;
     try {
-      let path = file.parentId ? folderPathsRef.current.get(file.parentId) : [];
-      if (!path) {
-        // The folders API lists children only; resolve uncached ancestors from the root.
-        const queue: api.ApiFolder[][] = [[]];
-        const visited = new Set<string>();
-        while (queue.length && !path) {
-          const parentPath = queue.shift()!;
-          const { folders } = await api.folders.list(parentPath.at(-1)?.id ?? null);
-          if (navigation !== folderNavigationRef.current) return;
-          for (const folder of folders) {
-            if (visited.has(folder.id)) continue;
-            visited.add(folder.id);
-            const nextPath = [...parentPath, folder];
-            folderPathsRef.current.set(folder.id, nextPath);
-            if (folder.id === file.parentId) path = nextPath;
-            queue.push(nextPath);
-          }
-        }
-        if (!path) throw new Error('The containing folder could not be found. Refresh files and try again.');
-      }
+      const path = file.parentId ? (await api.folders.get(file.parentId)).breadcrumbs : [];
       if (navigation !== folderNavigationRef.current) return;
-      setFolderPath(path);
+      setSearch(''); setFolderPath(path); setCurrentView('all-files');
+      const url = new URL(window.location.href);
+      url.searchParams.delete('q');
+      if (path.length) url.searchParams.set('folder', path.at(-1)!.id); else url.searchParams.delete('folder');
+      window.history.pushState(null, '', `${url.pathname}${url.search}`);
       setSelectedFile(file);
       setFileSelectionRevision((revision) => revision + 1);
       setCurrentView('all-files');
     } catch (error) {
       if (navigation === folderNavigationRef.current) addToast('Unable to open file location', error instanceof Error ? error.message : undefined, 'error');
     }
+  };
+
+  const runOperation = async (payload: Parameters<typeof api.drive.operate>[0], allowPartial = false) => {
+    const { results } = await api.drive.operate({ ...payload, items: payload.items.map(({ id, type }) => ({ id, type })) });
+    refreshDrive();
+    void reloadFiles().catch(() => {});
+    const failures = results.filter((result) => !result.ok);
+    if (payload.action === 'move' && clipboard?.mode === 'move') {
+      const completed = new Set(results.filter((result) => result.ok).map((result) => `${result.type}:${result.id}`));
+      setClipboard((current) => {
+        if (!current) return null;
+        const items = current.items.filter((item) => !completed.has(`${item.type}:${item.id}`));
+        return items.length ? { ...current, items } : null;
+      });
+    }
+    if (failures.length && !allowPartial) {
+      const messages = failures.map((result) => 'error' in result ? result.error.message : '').filter(Boolean);
+      throw new Error(`${results.length - failures.length}/${results.length} completed. ${[...new Set(messages)].join(' ')}`);
+    }
+    return results;
+  };
+
+  const handleTrash = async (items: api.DriveItem[]) => {
+    const results = await runOperation({ action: 'trash', items }, true);
+    const ids = results.filter((result) => result.ok && result.type === 'file').map((result) => result.id);
+    void reloadFiles().catch(() => {});
+    if (ids.length) addToast('نُقلت الملفات إلى السلة', `${ids.length} ملف`, 'success', {
+      label: 'تراجع', onClick: () => {
+        void Promise.all(ids.map((id) => api.files.restore(id)))
+          .then(() => { refreshDrive(); void reloadFiles().catch(() => {}); addToast('استُعيدت الملفات'); })
+          .catch((error) => addToast('تعذّر التراجع', error instanceof Error ? error.message : undefined, 'error'));
+      },
+    });
+    const failures = results.filter((result) => 'error' in result);
+    if (failures.length) throw new Error(failures.map((result) => 'error' in result ? result.error.message : '').join(' '));
+  };
+
+  const handleUploadFiles = (incoming: File[]) => {
+    setDroppedFiles(incoming); setIsUploadOpen(true);
   };
 
   // ===== إجراءات الملفّات =====
@@ -282,17 +382,6 @@ export default function App() {
       addToast(`نُسخ ${label}`, text);
     } catch (error) {
       addToast('تعذّر النسخ', error instanceof Error ? error.message : 'تحقّق من أذونات الحافظة.', 'error');
-    }
-  };
-
-  const handleDeleteFiles = async (ids: string[]) => {
-    if (!ids.length || !window.confirm(`Move ${ids.length} selected item${ids.length === 1 ? '' : 's'} to Trash?`)) return;
-    try {
-      await Promise.all(ids.map((id) => api.files.trash(id)));
-      addToast('نُقل إلى السلّة', `${ids.length} عنصر`, 'warning');
-      await Promise.all([reloadFiles(), reloadWorkspace()]);
-    } catch (error) {
-      addToast('تعذّر حذف الملفّات', error instanceof Error ? error.message : undefined, 'error');
     }
   };
 
@@ -430,6 +519,7 @@ export default function App() {
         username={username}
         onNavigate={(view) => {
           setCurrentView(view);
+          if (view === 'all-files') refreshDrive();
           window.scrollTo({ top: 0, behavior: 'smooth' });
         }}
         onOpenUpload={() => setIsUploadOpen(true)}
@@ -472,22 +562,42 @@ export default function App() {
           {currentView === 'all-files' && (
             <AllFilesView
               key={`${currentFolderId ?? 'root'}:${fileSelectionRevision}`}
-              files={files.filter((file) => (file.parentId ?? null) === currentFolderId)}
+              files={explorerFiles}
               folders={childFolders}
               folderPath={folderPath}
               foldersLoading={foldersLoading}
               foldersError={foldersError}
               onNavigateFolder={navigateFolder}
               onCreateFolder={handleCreateFolder}
-              onRetryFolders={() => setFolderRevision((revision) => revision + 1)}
+              onRetryFolders={refreshDrive}
               viewLayout={viewLayout}
               shareRevision={shareRevision}
-              isLoading={filesLoading}
-              loadError={filesError}
-              onRetry={() => { void reloadFiles().catch(() => {}); }}
+              isLoading={foldersLoading}
+              loadError={explorerError}
+              onRetry={refreshDrive}
               selectedFile={selectedFile}
+              selectionRevision={fileSelectionRevision}
               onSelectFile={(f) => setSelectedFile(f)}
-              onDeleteFiles={handleDeleteFiles}
+              onRename={async (item, name) => { await runOperation({ action: 'rename', items: [item], name }); }}
+              onTransfer={async (items, destinationId, mode) => { await runOperation({ action: mode, items, destinationId }); }}
+              onTrash={handleTrash}
+              onUploadFiles={handleUploadFiles}
+              search={search}
+              onSearchChange={(value) => {
+                setSearch(value);
+                const url = new URL(window.location.href);
+                if (value.trim()) url.searchParams.set('q', value); else url.searchParams.delete('q');
+                window.history.replaceState(null, '', `${url.pathname}${url.search}`);
+              }}
+              onRefresh={refreshDrive}
+              nextOffset={nextOffset}
+              onLoadMore={() => void loadMore()}
+              total={explorerTotal}
+              clipboard={clipboard}
+              onClipboardChange={setClipboard}
+              sortBy={sortBy}
+              sortOrder={sortOrder}
+              onSortChange={(sort, order) => { setSortBy(sort); setSortOrder(order); }}
               onDownloadFile={handleDownloadFile}
               onOpenUpload={() => setIsUploadOpen(true)}
               onOpenCreateShare={(t) => openShare(t)}
@@ -583,7 +693,9 @@ export default function App() {
         onClose={() => setIsUploadOpen(false)}
         folderId={currentFolderId}
         folderName={currentFolder?.path ?? '/'}
-        onUploaded={() => { void reloadFiles().catch(() => {}); void reloadWorkspace(); }}
+        initialFiles={droppedFiles}
+        onInitialFilesHandled={() => setDroppedFiles([])}
+        onUploaded={() => { refreshDrive(); void reloadFiles().catch(() => {}); }}
         onToast={addToast}
       />
 
@@ -618,6 +730,11 @@ export default function App() {
         onChangeView={(v) => setCurrentView(v)}
         onOpenUpload={() => setIsUploadOpen(true)}
         onOpenCreateShare={() => openShare()}
+        onSearchDrive={(query) => {
+          setCurrentView('all-files'); setSearch(query);
+          const url = new URL(window.location.href); url.searchParams.set('q', query);
+          window.history.replaceState(null, '', `${url.pathname}${url.search}`);
+        }}
       />
     </div>
   );

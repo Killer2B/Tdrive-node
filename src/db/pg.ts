@@ -95,8 +95,8 @@ export async function scalar(sql: string, params: unknown[] = []): Promise<numbe
 }
 
 /** معاملة (transaction) على اتصال واحد. */
-export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
-  const client = await getPool().connect();
+export async function withTransaction<T>(fn: (client: DbExecutor) => Promise<T>): Promise<T> {
+  const client = executor ?? await getPool().connect();
   try {
     await client.query('BEGIN');
     const out = await fn(client);
@@ -110,7 +110,7 @@ export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>)
     }
     throw e;
   } finally {
-    client.release();
+    if ('release' in client) (client as PoolClient).release();
   }
 }
 
@@ -134,4 +134,3 @@ export async function closePool(): Promise<void> {
   pool = null;
   await p.end();
 }
-

@@ -1,9 +1,19 @@
-import React, { useEffect, useState } from 'react';
-import { ExternalLink, FileItem, FileCategory } from '../../types';
+import React, { useEffect, useRef, useState } from 'react';
+import type { ExternalLink, FileItem } from '../../types';
 import * as api from '../../api';
 import { VideoPlayer } from '../VideoPlayer';
+import { ExplorerDialog, ExplorerNameDialog, explorerButton } from '../modals/ExplorerDialog';
+import { FolderPickerModal } from '../modals/FolderPickerModal';
+import { ExplorerMenu, type ExplorerMenuAction } from '../modals/ExplorerMenu';
 
-interface AllFilesViewProps {
+export interface DriveItem {
+  id: string;
+  type: 'file' | 'folder';
+  name: string;
+  parentId?: string | null;
+}
+export interface DriveClipboard { mode: 'move' | 'copy'; items: DriveItem[] }
+export interface AllFilesViewProps {
   files: FileItem[];
   folders: api.ApiFolder[];
   folderPath: api.ApiFolder[];
@@ -18,640 +28,456 @@ interface AllFilesViewProps {
   loadError: string | null;
   onRetry: () => void;
   selectedFile: FileItem | null;
+  selectionRevision?: number;
   onSelectFile: (file: FileItem) => void;
-  onDeleteFiles: (ids: string[]) => void;
   onDownloadFile: (file: FileItem) => void;
   onOpenUpload: () => void;
   onOpenCreateShare: (target?: { fileId?: string; name?: string }) => void;
   onCopyChecksum: (hash: string) => void;
-  onExportAuditLogs: () => void;
+  onExportAuditLogs?: () => void;
+  onRename: (item: DriveItem, name: string) => Promise<void>;
+  onTransfer: (items: DriveItem[], destinationId: string | null, mode: 'move' | 'copy') => Promise<void>;
+  onTrash: (items: DriveItem[]) => Promise<void>;
+  onUploadFiles: (files: File[]) => void;
+  search: string;
+  onSearchChange: (query: string) => void;
+  onRefresh: () => void;
+  nextOffset: number | null;
+  onLoadMore: () => void;
+  total: number;
+  clipboard: DriveClipboard | null;
+  onClipboardChange: (clipboard: DriveClipboard | null) => void;
+  sortBy: 'name' | 'modified' | 'size';
+  sortOrder: 'asc' | 'desc';
+  onSortChange: (sort: 'name' | 'modified' | 'size', order: 'asc' | 'desc') => void;
 }
 
-export const AllFilesView: React.FC<AllFilesViewProps> = ({
-  files,
-  folders,
-  folderPath,
-  foldersLoading,
-  foldersError,
-  onNavigateFolder,
-  onCreateFolder,
-  onRetryFolders,
-  viewLayout,
-  shareRevision,
-  isLoading,
-  loadError,
-  onRetry,
-  selectedFile,
-  onSelectFile,
-  onDeleteFiles,
-  onDownloadFile,
-  onOpenUpload,
-  onOpenCreateShare,
-  onCopyChecksum,
-  onExportAuditLogs,
-}) => {
-  const [activeCategory, setActiveCategory] = useState<'all' | FileCategory>('all');
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [sortBy, setSortBy] = useState<'modified' | 'size' | 'name'>('modified');
-  const [isInspectorOpen, setIsInspectorOpen] = useState(true);
-  const [fileShares, setFileShares] = useState<ExternalLink[]>([]);
-  const [fileActivity, setFileActivity] = useState<api.ApiActivity[]>([]);
-  const [detailsLoading, setDetailsLoading] = useState(false);
-  const [detailsError, setDetailsError] = useState<string | null>(null);
-  const [detailsReload, setDetailsReload] = useState(0);
-  const [showCreateFolder, setShowCreateFolder] = useState(false);
-  const [folderName, setFolderName] = useState('');
-  const [creatingFolder, setCreatingFolder] = useState(false);
-  const [createFolderError, setCreateFolderError] = useState<string | null>(null);
+const itemKey = (item: DriveItem) => `${item.type}:${item.id}`;
+const dragType = 'application/x-tdrive-items';
+const iconForFile = (file: FileItem) => file.type === 'video' ? 'movie' : /^(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(file.extension ?? '') ? 'image' : file.type === 'doc' ? 'description' : file.type === 'archive' ? 'folder_zip' : file.type === 'code' ? 'code' : 'draft';
 
-  const createFolder = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (creatingFolder || !folderName.trim()) return;
-    setCreatingFolder(true);
-    setCreateFolderError(null);
-    try {
-      await onCreateFolder(folderName.trim());
-      setFolderName('');
-      setShowCreateFolder(false);
-    } catch (error) {
-      setCreateFolderError(error instanceof Error ? error.message : 'Unable to create folder.');
+export const AllFilesView: React.FC<AllFilesViewProps> = (props) => {
+  const { files, folders, folderPath, viewLayout, clipboard, search } = props;
+  const currentId = folderPath.at(-1)?.id ?? null;
+  const entries: DriveItem[] = [
+    ...folders.map((folder): DriveItem => ({ id: folder.id, name: folder.name, type: 'folder', parentId: folder.parentId })),
+    ...files.map((file): DriveItem => ({ id: file.id, name: file.name, type: 'file', parentId: file.parentId })),
+  ];
+  const [selected, setSelected] = useState<string[]>([]);
+  const [focused, setFocused] = useState<string | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [preview, setPreview] = useState<FileItem | null>(null);
+  const [nameDialog, setNameDialog] = useState<{ mode: 'create' | 'rename'; item?: DriveItem } | null>(null);
+  const [picker, setPicker] = useState<{ mode: 'move' | 'copy'; items: DriveItem[] } | null>(null);
+  const [trashItems, setTrashItems] = useState<DriveItem[] | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: DriveItem[]; trigger: HTMLElement | null } | null>(null);
+  const [busy, setBusy] = useState<Record<string, string>>({});
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [externalDrag, setExternalDrag] = useState(false);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const root = useRef<HTMLDivElement>(null);
+  const rowRefs = useRef(new Map<string, HTMLDivElement>());
+  const anchor = useRef<string | null>(null);
+  const dragItems = useRef<DriveItem[]>([]);
+  const navigation = useRef(0);
+  const busyItems = useRef(new Set<string>());
+  const mounted = useRef(true);
+  const latestClipboard = useRef(clipboard);
+  latestClipboard.current = clipboard;
+  const selectedItems = entries.filter((item) => selected.includes(itemKey(item)));
+  const single = selectedItems.length === 1 ? selectedItems[0] : null;
+  const activeFile = single?.type === 'file' ? files.find((file) => file.id === single.id) ?? null : null;
+  const selectionBusy = selectedItems.some((item) => busy[itemKey(item)]);
+  const allSelected = entries.length > 0 && selectedItems.length === entries.length;
+  const selectAllRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  useEffect(() => {
+    setSelected([]); setFocused(null); setMenu(null); setDetailsOpen(false); setPreview(null);
+    anchor.current = null;
+    navigation.current++;
+  }, [currentId, search]);
+  useEffect(() => {
+    const keys = new Set(entries.map(itemKey));
+    setSelected((previous) => previous.filter((key) => keys.has(key)));
+  }, [files, folders]);
+  useEffect(() => {
+    const file = props.selectedFile;
+    if (!file) return;
+    const key = `file:${file.id}`;
+    if (files.some((candidate) => candidate.id === file.id)) { setSelected((previous) => previous.includes(key) ? previous : [key]); setFocused(key); }
+    else setPreview(file);
+  }, [props.selectionRevision]);
+  useEffect(() => {
+    if (selectAllRef.current) selectAllRef.current.indeterminate = selectedItems.length > 0 && !allSelected;
+  }, [selectedItems.length, allSelected]);
+
+  const runAction = async (label: string, items: DriveItem[], action: () => Promise<void>) => {
+    const keys = items.map(itemKey);
+    if (keys.some((key) => busyItems.current.has(key))) throw new Error('These items are already being updated.');
+    keys.forEach((key) => busyItems.current.add(key));
+    setBusy((previous) => ({ ...previous, ...Object.fromEntries(keys.map((key) => [key, label])) }));
+    setActionError(null); setNotice(null);
+    try { await action(); }
+    catch (cause) {
+      if (mounted.current) setActionError(cause instanceof Error ? cause.message : `Could not finish ${label.toLowerCase()}.`);
+      throw cause;
     } finally {
-      setCreatingFolder(false);
+      keys.forEach((key) => busyItems.current.delete(key));
+      if (mounted.current) setBusy((previous) => Object.fromEntries(Object.entries(previous).filter(([key]) => !keys.includes(key))));
     }
+  };
+  const focusRow = (key: string) => { setFocused(key); rowRefs.current.get(key)?.focus(); };
+  const selectItem = (item: DriveItem, modifiers: { shiftKey?: boolean; ctrlKey?: boolean; metaKey?: boolean } = {}) => {
+    const key = itemKey(item);
+    const toggle = modifiers.ctrlKey || modifiers.metaKey;
+    if (modifiers.shiftKey && anchor.current) {
+      const from = entries.findIndex((entry) => itemKey(entry) === anchor.current);
+      const to = entries.findIndex((entry) => itemKey(entry) === key);
+      const range = entries.slice(Math.min(from < 0 ? to : from, to), Math.max(from, to) + 1).map(itemKey);
+      setSelected((previous) => toggle ? [...new Set([...previous, ...range])] : range);
+    } else {
+      setSelected((previous) => toggle ? previous.includes(key) ? previous.filter((value) => value !== key) : [...previous, key] : [key]);
+      anchor.current = key;
+    }
+    setFocused(key);
+    if (item.type === 'file') {
+      const file = files.find((candidate) => candidate.id === item.id);
+      if (file) props.onSelectFile(file);
+    }
+  };
+  const openItem = (item: DriveItem) => {
+    if (busyItems.current.has(itemKey(item))) return;
+    if (item.type === 'folder') {
+      const folder = folders.find((candidate) => candidate.id === item.id);
+      if (folder && !search.trim()) props.onNavigateFolder([...folderPath, folder]);
+      else if (folder) {
+        const revision = ++navigation.current;
+        void runAction('Opening', [item], async () => {
+          const path: api.ApiFolder[] = [];
+          const seen = new Set<string>();
+          let id: string | null = folder.id;
+          while (id) {
+            if (seen.has(id)) throw new Error('The folder path could not be resolved.');
+            seen.add(id);
+            const result = await api.folders.get(id);
+            if (!mounted.current || navigation.current !== revision) return;
+            path.unshift(result.folder);
+            id = result.folder.parentId;
+          }
+          props.onNavigateFolder(path);
+        }).catch(() => {});
+      }
+    } else {
+      const file = files.find((candidate) => candidate.id === item.id);
+      if (file) { props.onSelectFile(file); setPreview(file); }
+    }
+  };
+  const putClipboard = (items: DriveItem[], mode: 'move' | 'copy') => {
+    if (!items.length) return;
+    props.onClipboardChange({ mode, items: items.map((item) => ({ ...item })) });
+    setNotice(`${items.length} ${items.length === 1 ? 'item' : 'items'} ready to ${mode === 'move' ? 'move' : 'copy'}. Open a destination folder and paste.`);
+  };
+  const paste = () => {
+    if (!clipboard?.items.length) return;
+    const snapshot = clipboard;
+    void runAction(snapshot.mode === 'move' ? 'Moving' : 'Copying', snapshot.items, () => props.onTransfer(snapshot.items, currentId, snapshot.mode))
+      .then(() => {
+        if (snapshot.mode === 'move' && latestClipboard.current === snapshot) props.onClipboardChange(null);
+        if (mounted.current) setNotice(snapshot.mode === 'move' ? 'Items moved.' : 'Items copied.');
+      }).catch(() => {});
+  };
+  const trash = (items: DriveItem[]) => {
+    if (!items.length) return;
+    setTrashItems(items.map((item) => ({ ...item })));
+  };
+  const openMenu = (item: DriveItem, x: number, y: number, trigger: HTMLElement | null) => {
+    const targets = selected.includes(itemKey(item)) ? selectedItems : [item];
+    if (!selected.includes(itemKey(item))) selectItem(item);
+    setMenu({ x, y, items: targets, trigger });
   };
 
   useEffect(() => {
-    setSelectedIds((ids) => ids.filter((id) => files.some((file) => file.id === id)));
-  }, [files]);
-
-  // Filtered files
-  const filteredFiles = files.filter((file) => {
-    if (activeCategory === 'all') return true;
-    return file.type === activeCategory;
-  }).sort((a, b) => {
-    if (sortBy === 'name') return a.name.localeCompare(b.name);
-    if (sortBy === 'size') return b.sizeBytes - a.sizeBytes;
-    return b.modifiedTs - a.modifiedTs;
+    const handleKey = (event: KeyboardEvent) => {
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (event.defaultPrevented || !target || !root.current?.contains(target) || target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]') || document.querySelector('dialog[open],[aria-modal="true"]') || nameDialog || picker || preview || menu || trashItems) return;
+      const command = event.ctrlKey || event.metaKey;
+      if (command && event.key.toLowerCase() === 'a') { event.preventDefault(); setSelected(entries.map(itemKey)); return; }
+      if (command && ['c', 'x', 'v'].includes(event.key.toLowerCase())) {
+        event.preventDefault();
+        if (event.key.toLowerCase() === 'v') paste();
+        else if (!selectionBusy) putClipboard(selectedItems, event.key.toLowerCase() === 'x' ? 'move' : 'copy');
+        return;
+      }
+      if (event.key === 'Escape') { event.preventDefault(); setSelected([]); setDetailsOpen(false); anchor.current = null; return; }
+      if (event.key === 'Delete' && selectedItems.length && !selectionBusy) { event.preventDefault(); trash(selectedItems); return; }
+      if (event.key === 'F2' && single && !selectionBusy) { event.preventDefault(); setNameDialog({ mode: 'rename', item: single }); return; }
+      if (target.closest('button,a,summary')) return;
+      if (event.key === 'Enter' && single) { event.preventDefault(); openItem(single); return; }
+      const focusItem = entries.find((item) => itemKey(item) === focused) ?? single;
+      if ((event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) && focusItem) {
+        event.preventDefault();
+        const row = rowRefs.current.get(itemKey(focusItem));
+        const bounds = row?.getBoundingClientRect();
+        openMenu(focusItem, bounds?.left ?? 20, bounds?.bottom ?? 100, row ?? null); return;
+      }
+      if (event.key === ' ' && focusItem) { event.preventDefault(); selectItem(focusItem, { ctrlKey: true }); return; }
+      if (['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) && entries.length) {
+        event.preventDefault();
+        const index = entries.findIndex((item) => itemKey(item) === focused);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? entries.length - 1 : Math.max(0, Math.min(entries.length - 1, index + (event.key === 'ArrowUp' || event.key === 'ArrowLeft' ? -1 : 1)));
+        if (!command || event.shiftKey) selectItem(entries[next], event);
+        focusRow(itemKey(entries[next]));
+      }
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
   });
 
-  const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setSelectedIds(e.target.checked ? filteredFiles.map((f) => f.id) : []);
+  const isInternal = (event: React.DragEvent) => event.dataTransfer.types.includes(dragType);
+  const moveDropped = (event: React.DragEvent, destinationId: string | null) => {
+    event.preventDefault(); event.stopPropagation(); setDropTarget(null); setExternalDrag(false);
+    const items = dragItems.current;
+    dragItems.current = [];
+    if (!items.length) { setActionError('This drag has expired. Select the items and try again.'); return; }
+    if (items.some((item) => item.type === 'folder' && item.id === destinationId)) { setActionError('A folder cannot be moved into itself.'); return; }
+    void runAction('Moving', items, () => props.onTransfer(items, destinationId, 'move')).catch(() => {});
   };
+  const menuItems = menu?.items ?? [];
+  const menuSingle = menuItems.length === 1 ? menuItems[0] : null;
+  const menuFile = menuSingle?.type === 'file' ? files.find((file) => file.id === menuSingle.id) : null;
+  const menuBusy = menuItems.some((item) => busy[itemKey(item)]);
+  const menuActions: ExplorerMenuAction[] = [
+    { label: 'Open', icon: 'open_in_new', shortcut: 'Enter', disabled: !menuSingle || menuBusy, onClick: () => { if (menuSingle) openItem(menuSingle); } },
+    { label: 'Cut', icon: 'content_cut', shortcut: 'Ctrl / Cmd+X', disabled: menuBusy, onClick: () => putClipboard(menuItems, 'move') },
+    { label: 'Copy', icon: 'content_copy', shortcut: 'Ctrl / Cmd+C', disabled: menuBusy, onClick: () => putClipboard(menuItems, 'copy') },
+    { label: 'Move to...', icon: 'drive_file_move', disabled: menuBusy, onClick: () => setPicker({ mode: 'move', items: menuItems }) },
+    { label: 'Copy to...', icon: 'folder_copy', disabled: menuBusy, onClick: () => setPicker({ mode: 'copy', items: menuItems }) },
+    { label: 'Rename', icon: 'edit', shortcut: 'F2', disabled: !menuSingle || menuBusy, onClick: () => { if (menuSingle) setNameDialog({ mode: 'rename', item: menuSingle }); } },
+    ...(menuFile ? [
+      { label: 'Download', icon: 'download', onClick: () => props.onDownloadFile(menuFile) },
+      { label: 'Share', icon: 'share', onClick: () => props.onOpenCreateShare({ fileId: menuFile.id, name: menuFile.name }) },
+    ] : []),
+    { label: 'Details', icon: 'info', disabled: !menuSingle, onClick: () => setDetailsOpen(true) },
+    { label: 'Move to trash', icon: 'delete', shortcut: 'Delete', disabled: menuBusy, danger: true, onClick: () => trash(menuItems) },
+  ];
 
-  const handleRowClick = (file: FileItem) => {
-    onSelectFile(file);
-    if (!selectedIds.includes(file.id)) {
-      setSelectedIds([file.id]);
-    }
-    setIsInspectorOpen(true);
-  };
-
-  const activeInspectionFile = selectedFile && files.some((file) => file.id === selectedFile.id)
-    ? selectedFile
-    : files[0];
-
-  useEffect(() => {
-    if (!activeInspectionFile) {
-      setFileShares([]);
-      setFileActivity([]);
-      return;
-    }
-    let active = true;
-    setDetailsLoading(true);
-    setDetailsError(null);
-    Promise.all([
-      api.shares.forFile(activeInspectionFile.id),
-      api.activity.list({ fileId: activeInspectionFile.id, limit: 10 }),
-    ])
-      .then(([shares, activity]) => {
-        if (!active) return;
-        setFileShares(shares.shares);
-        setFileActivity(activity.items);
-      })
-      .catch((error: unknown) => {
-        if (active) setDetailsError(error instanceof Error ? error.message : 'Could not load file details.');
-      })
-      .finally(() => { if (active) setDetailsLoading(false); });
-    return () => { active = false; };
-  }, [activeInspectionFile?.id, detailsReload, shareRevision]);
-
-  return (
-    <div className="flex flex-col w-full min-h-screen">
-      {/* Sub-Header Command Bar: Breadcrumb, Metrics & High-Level Actions */}
-      <div className="px-6 py-3.5 bg-surface-container-low border-b border-white/5 flex flex-wrap items-center justify-between gap-4 shadow-sm">
-        <div className="flex items-center gap-3 flex-wrap">
-          <nav aria-label="Folder breadcrumb" className="flex flex-wrap items-center gap-1.5 font-mono text-xs text-outline min-w-0">
-            <button type="button" aria-current={folderPath.length === 0 ? 'page' : undefined} onClick={() => onNavigateFolder([])} className="flex items-center gap-1 min-h-11 hover:text-primary rounded focus-visible:outline focus-visible:outline-primary">
-              <span aria-hidden="true" className="material-symbols-outlined text-sm">dns</span>
-              Workspace
-            </button>
-            {folderPath.map((folder, index) => <React.Fragment key={folder.id}>
-              <span aria-hidden="true" className="material-symbols-outlined text-sm text-outline-variant">chevron_right</span>
-              <button type="button" aria-current={index === folderPath.length - 1 ? 'page' : undefined} onClick={() => onNavigateFolder(folderPath.slice(0, index + 1))} className="min-h-11 max-w-48 truncate text-on-surface font-medium bg-surface-container-high px-2 rounded hover:text-primary focus-visible:outline focus-visible:outline-primary" title={folder.name}>{folder.name}</button>
-            </React.Fragment>)}
-          </nav>
-          <div className="h-3.5 w-px bg-surface-container-highest mx-1 hidden md:block"></div>
-          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container text-secondary text-xs font-mono">
-            <span className="w-1.5 h-1.5 rounded-full bg-secondary-container animate-pulse"></span>
-            Server-managed storage
-          </div>
-        </div>
-
-        {/* Top Action Set */}
-        <div className="flex flex-wrap items-center gap-2">
-          {folderPath.length > 0 && <button type="button" onClick={() => onNavigateFolder(folderPath.slice(0, -1))} className="min-h-11 flex items-center gap-1.5 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-mono rounded"><span aria-hidden="true" className="material-symbols-outlined text-base">arrow_upward</span>Parent folder</button>}
-          <button type="button" onClick={() => setShowCreateFolder((open) => !open)} aria-expanded={showCreateFolder} className="min-h-11 flex items-center gap-1.5 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-mono rounded"><span aria-hidden="true" className="material-symbols-outlined text-base">create_new_folder</span>New folder</button>
-          <button
-            type="button"
-            onClick={onExportAuditLogs}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-mono rounded shadow-sm transition-all cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-base">lock_open</span>
-            <span>Export Activity</span>
-          </button>
-          <button
-            type="button"
-            onClick={onOpenUpload}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 bg-primary-container text-on-primary-container text-xs font-semibold rounded shadow-[0_2px_12px_rgba(47,145,255,0.3)] hover:bg-secondary-container hover:text-on-secondary-fixed-variant transition-all cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-base">cloud_upload</span>
-            <span>Secure Ingest</span>
-          </button>
-        </div>
-      </div>
-
-      {showCreateFolder && <form onSubmit={(event) => void createFolder(event)} className="px-6 py-4 bg-surface-container-low border-b border-white/5 space-y-2">
-        <label htmlFor="folder-name" className="block font-mono text-xs text-outline">Folder name</label>
+  return <div ref={root} className="flex min-w-0 flex-col" aria-label="File explorer"
+    onDragOver={(event) => {
+      if (isInternal(event) || event.dataTransfer.types.includes('Files')) {
+        event.preventDefault(); event.dataTransfer.dropEffect = isInternal(event) ? 'move' : 'copy';
+        if (!isInternal(event)) setExternalDrag(true);
+      }
+    }}
+    onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setExternalDrag(false); }}
+    onDrop={(event) => {
+      if (isInternal(event)) { moveDropped(event, currentId); return; }
+      event.preventDefault(); setExternalDrag(false);
+      const dropped = [...event.dataTransfer.files];
+      const hasDirectory = [...event.dataTransfer.items].some((item) => item.webkitGetAsEntry?.()?.isDirectory);
+      if (hasDirectory) { setActionError('Folder uploads are not supported yet. Open the folder on your computer and drop its files instead.'); return; }
+      if (dropped.length) { setActionError(null); props.onUploadFiles(dropped); }
+    }}>
+    <div className="space-y-4 border-b border-white/5 bg-surface-container-low px-3 py-4 sm:px-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <nav aria-label="Folder breadcrumb" className="flex min-w-0 flex-wrap items-center gap-1 text-sm">
+          <button type="button" onClick={() => props.onNavigateFolder([])} aria-current={!folderPath.length ? 'page' : undefined} className={`${explorerButton} font-medium`}>My files</button>
+          {folderPath.map((folder, index) => <React.Fragment key={folder.id}>
+            <span aria-hidden="true" className="material-symbols-outlined text-outline">chevron_right</span>
+            <button type="button" title={folder.name} onClick={() => props.onNavigateFolder(folderPath.slice(0, index + 1))} aria-current={index === folderPath.length - 1 ? 'page' : undefined} className={`${explorerButton} max-w-full truncate sm:max-w-60`}>{folder.name}</button>
+          </React.Fragment>)}
+        </nav>
         <div className="flex flex-wrap gap-2">
-          <input id="folder-name" autoFocus required maxLength={200} disabled={creatingFolder} value={folderName} onChange={(event) => setFolderName(event.target.value)} className="min-w-0 flex-1 bg-surface-container-lowest border border-white/10 text-on-surface text-sm p-3 rounded-lg focus:outline-none focus:border-primary-container" />
-          <button type="submit" disabled={creatingFolder || !folderName.trim()} className="min-h-11 px-4 rounded-lg bg-primary-container text-on-primary-container font-mono text-xs disabled:opacity-50">{creatingFolder ? 'Creating...' : 'Create folder'}</button>
-          <button type="button" disabled={creatingFolder} onClick={() => setShowCreateFolder(false)} className="min-h-11 px-3 rounded-lg text-outline hover:bg-surface-container disabled:opacity-50">Cancel</button>
-        </div>
-        {createFolderError && <p role="alert" className="text-sm text-error">{createFolderError}</p>}
-      </form>}
-
-      {/* Filter, Bulk Operation & Controls Strip */}
-      <div className="px-6 py-2 bg-surface-container-lowest border-b border-white/5 flex flex-wrap items-center justify-between gap-4">
-        {/* Category Badges / Filters */}
-        <div className="flex items-center gap-1.5 overflow-x-auto py-1">
-          <button
-            type="button"
-            onClick={() => setActiveCategory('all')}
-            className={`px-3 py-1 rounded font-mono text-xs whitespace-nowrap transition-colors cursor-pointer ${
-              activeCategory === 'all'
-                ? 'bg-primary-container text-on-primary-container font-medium shadow-sm'
-                : 'bg-surface-container text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high'
-            }`}
-          >
-            All Types
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveCategory('design')}
-            className={`px-3 py-1 rounded font-mono text-xs whitespace-nowrap transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeCategory === 'design'
-                ? 'bg-primary-container text-on-primary-container font-medium'
-                : 'bg-surface-container text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high'
-            }`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-secondary-fixed-dim"></span>Design (.fig, .ai)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveCategory('code')}
-            className={`px-3 py-1 rounded font-mono text-xs whitespace-nowrap transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeCategory === 'code'
-                ? 'bg-primary-container text-on-primary-container font-medium'
-                : 'bg-surface-container text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high'
-            }`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-primary"></span>Code (.ts, .py)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveCategory('video')}
-            className={`px-3 py-1 rounded font-mono text-xs whitespace-nowrap transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeCategory === 'video'
-                ? 'bg-primary-container text-on-primary-container font-medium'
-                : 'bg-surface-container text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high'
-            }`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-secondary-container"></span>Video (.mov, .prores)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveCategory('doc')}
-            className={`px-3 py-1 rounded font-mono text-xs whitespace-nowrap transition-colors flex items-center gap-1.5 cursor-pointer ${
-              activeCategory === 'doc'
-                ? 'bg-primary-container text-on-primary-container font-medium'
-                : 'bg-surface-container text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high'
-            }`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-tertiary"></span>Documents (.pdf, .key)
-          </button>
-        </div>
-
-        {/* Active Selection HUD & View Toggles */}
-        <div className="flex items-center gap-3">
-          {/* Active Bulk Selection */}
-          {selectedIds.length > 0 && (
-            <div className="flex items-center gap-1 bg-surface-container-high px-2 py-1 rounded border border-white/5 shadow-sm">
-              <span className="font-mono text-xs text-primary font-medium px-1">
-                {selectedIds.length} selected
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  const first = files.find(f => selectedIds.includes(f.id));
-                  if (first) onDownloadFile(first);
-                }}
-                className="flex items-center gap-1 px-2 py-0.5 rounded text-on-surface hover:bg-surface-bright font-mono text-xs transition-colors"
-                title="Download selected"
-              >
-                <span className="material-symbols-outlined text-sm text-primary">download</span>
-                <span>Download</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => { if (activeInspectionFile) onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name }); }}
-                className="flex items-center gap-1 px-2 py-0.5 rounded text-on-surface hover:bg-surface-bright font-mono text-xs transition-colors"
-                title="Share link"
-              >
-                <span className="material-symbols-outlined text-sm">link</span>
-                <span>Share</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => onDeleteFiles(selectedIds)}
-                className="p-1 rounded text-error hover:bg-error-container/40 transition-colors"
-                title="Move to Trash"
-              >
-                <span className="material-symbols-outlined text-sm">delete</span>
-              </button>
-            </div>
-          )}
-
-          <div className="h-4 w-px bg-surface-container-highest"></div>
-
-          {/* Sort Selection */}
-          <div className="flex items-center gap-1 bg-surface-container px-2.5 py-1 rounded border border-white/5 text-on-surface-variant">
-            <span className="material-symbols-outlined text-sm text-outline">sort</span>
-            <select
-              value={sortBy}
-              onChange={(e) => {
-                if (e.target.value === 'modified' || e.target.value === 'size' || e.target.value === 'name') setSortBy(e.target.value);
-              }}
-              className="bg-transparent font-mono text-xs text-on-surface focus:outline-none cursor-pointer pr-1"
-            >
-              <option value="modified" className="bg-surface-container-high text-on-surface">Last modified</option>
-              <option value="size" className="bg-surface-container-high text-on-surface">File size</option>
-              <option value="name" className="bg-surface-container-high text-on-surface">Alphabetical (A-Z)</option>
-            </select>
-          </div>
-
-          {/* Inspector Toggle Button */}
-          <button
-            type="button"
-            onClick={() => setIsInspectorOpen(!isInspectorOpen)}
-            title="Toggle Inspector Panel"
-            className={`flex items-center gap-1 px-2.5 py-1 rounded font-mono text-xs transition-colors border border-white/5 cursor-pointer ${
-              isInspectorOpen
-                ? 'bg-surface-container-high text-primary'
-                : 'bg-surface-container text-on-surface-variant hover:text-on-surface'
-            }`}
-          >
-            <span className="material-symbols-outlined text-base">dock_to_left</span>
-            <span className="hidden sm:inline">Details</span>
-          </button>
+          <button type="button" onClick={() => setNameDialog({ mode: 'create' })} className={`${explorerButton} flex items-center gap-2 bg-surface-container`}><span aria-hidden="true" className="material-symbols-outlined">create_new_folder</span>New folder</button>
+          <button type="button" onClick={props.onOpenUpload} className={`${explorerButton} flex items-center gap-2 bg-primary-container font-medium text-on-primary-container hover:bg-primary`}><span aria-hidden="true" className="material-symbols-outlined">upload</span>Upload</button>
         </div>
       </div>
-
-      {/* Primary Workspace Canvas: Split Layout (Table + Right Inspector) */}
-      <div className="flex-1 flex flex-col xl:flex-row w-full overflow-hidden">
-        {/* Central Explorer Table Area */}
-        <div className="flex-1 overflow-x-auto min-w-0 bg-surface">
-          <section aria-label="Folders" className="p-4 border-b border-white/5 space-y-3">
-            <h2 className="font-mono text-xs text-outline uppercase tracking-wider">Folders</h2>
-            {foldersLoading && <p role="status" className="text-sm text-outline">Loading folders...</p>}
-            {foldersError && <div role="alert" className="flex flex-wrap gap-3 text-sm text-error"><span>{foldersError}</span><button type="button" onClick={onRetryFolders} className="underline">Retry folders</button></div>}
-            {!foldersLoading && !foldersError && folders.length === 0 && <p className="text-xs text-outline">No folders here. Use New folder to create one.</p>}
-            <div className={viewLayout === 'grid' ? 'grid grid-cols-1 sm:grid-cols-2 gap-3' : 'flex flex-col gap-1'}>
-              {[...folders].sort((a, b) => a.name.localeCompare(b.name)).map((folder) => <button key={folder.id} type="button" onClick={() => onNavigateFolder([...folderPath, folder])} className="min-h-11 flex items-center gap-3 p-3 rounded-xl bg-surface-container-low border border-white/5 text-left hover:bg-surface-container-high focus-visible:outline focus-visible:outline-primary transition-colors">
-                <span aria-hidden="true" className="material-symbols-outlined text-primary">folder</span>
-                <span className="flex-1 min-w-0 truncate text-sm text-on-surface" title={folder.name}>{folder.name}</span>
-                <span aria-hidden="true" className="material-symbols-outlined text-outline">chevron_right</span>
-              </button>)}
-            </div>
-          </section>
-          {loadError && files.length > 0 && <div role="alert" className="p-4 flex gap-3 text-sm text-error"><span>{loadError}</span><button type="button" onClick={onRetry} className="underline">Retry files</button></div>}
-          <div className={viewLayout === 'list' ? 'min-w-[780px]' : ''}>
-            {/* Table Header Bar */}
-            {viewLayout === 'list' && <div className="grid grid-cols-[40px_minmax(240px,2.5fr)_130px_100px_160px_48px] items-center px-6 py-2 bg-surface-container-lowest font-mono text-[11px] text-outline uppercase tracking-wider select-none border-b border-white/5">
-              <div className="flex items-center justify-center">
-                <input
-                  type="checkbox"
-                  checked={selectedIds.length === filteredFiles.length && filteredFiles.length > 0}
-                  onChange={handleSelectAll}
-                  className="w-3.5 h-3.5 rounded-sm bg-surface-container-high accent-primary-container cursor-pointer"
-                />
-              </div>
-              <div className="flex items-center gap-1 cursor-pointer hover:text-on-surface">
-                <span>Name</span>
-                <span className="material-symbols-outlined text-sm">arrow_downward</span>
-              </div>
-              <div>Type</div>
-              <div>Size</div>
-              <div>Modified</div>
-              <div className="text-right">Action</div>
-            </div>}
-
-            {/* Directory Rows */}
-            <div className={viewLayout === 'grid' ? 'grid grid-cols-1 sm:grid-cols-2 gap-3 p-4' : 'flex flex-col divide-y divide-white/5'}>
-              {isLoading && files.length === 0 ? (
-                <div className="p-12 text-center text-sm text-outline" role="status">Loading files…</div>
-              ) : loadError && files.length === 0 ? (
-                <div role="alert" className="p-12 text-center space-y-3"><p className="text-sm text-error">{loadError}</p><button type="button" onClick={onRetry} className="text-primary text-sm underline">Retry</button></div>
-              ) : filteredFiles.length === 0 ? (
-                <div className="p-12 text-center text-sm text-outline">No files match the selected category.</div>
-              ) : filteredFiles.map((file) => {
-                const isSelected = selectedIds.includes(file.id);
-                const isInspected = activeInspectionFile?.id === file.id;
-
-                return (
-                  <div
-                    key={file.id}
-                    onClick={() => handleRowClick(file)}
-                    className={`grid ${viewLayout === 'grid' ? 'grid-cols-[40px_minmax(0,1fr)] rounded-xl border border-white/5 p-4' : 'grid-cols-[40px_minmax(240px,2.5fr)_130px_100px_160px_48px] px-6 py-2.5'} items-center transition-colors group cursor-pointer relative ${
-                      isInspected
-                        ? 'bg-surface-container-high shadow-inner'
-                        : 'bg-surface hover:bg-surface-container-low'
-                    }`}
-                  >
-                    {/* Blue active indicator stripe */}
-                    {isInspected && (
-                      <div className="absolute left-0 top-0 bottom-0 w-1 bg-primary-container"></div>
-                    )}
-
-                    {/* Checkbox */}
-                    <div className="flex items-center justify-center">
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={(e) => {
-                          e.stopPropagation();
-                          setSelectedIds((current) => current.includes(file.id)
-                            ? current.filter((id) => id !== file.id)
-                            : [...current, file.id]);
-                        }}
-                        className="w-3.5 h-3.5 rounded-sm bg-surface-container-high accent-primary-container cursor-pointer"
-                      />
-                    </div>
-
-                    {/* Name & Icon */}
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className={`w-8 h-8 rounded flex items-center justify-center shrink-0 shadow-sm ${
-                        isInspected
-                          ? 'bg-primary-container/20 text-primary-container'
-                          : 'bg-surface-container-high text-primary'
-                      }`}>
-                        <span className="material-symbols-outlined text-lg">
-                          {file.type === 'folder' ? 'folder' :
-                           file.type === 'video' ? 'movie' :
-                           file.type === 'doc' ? 'picture_as_pdf' :
-                           file.type === 'code' ? 'data_object' :
-                           file.type === 'archive' ? 'folder_zip' : 'terminal'}
-                        </span>
-                      </div>
-                      <div className="min-w-0">
-                        <p className={`text-sm truncate transition-colors ${
-                          isInspected
-                            ? 'text-primary font-semibold'
-                            : 'text-on-surface font-medium group-hover:text-primary'
-                        }`}>
-                          {file.name}
-                        </p>
-                        <span className="font-mono text-xs text-outline">
-                          {file.extension ? `.${file.extension.toUpperCase()}` : file.type}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className={viewLayout === 'grid' ? 'col-span-2 grid grid-cols-2 gap-2 mt-2 pt-3 border-t border-white/5' : 'contents'}>
-                      <div className="font-mono text-xs text-on-surface-variant">{file.type}</div>
-                      <div className="font-mono text-xs text-on-surface font-medium">{file.size}</div>
-                      <div className="font-mono text-xs text-outline truncate">{file.modified}</div>
-                      <div className="text-right">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDownloadFile(file);
-                          }}
-                          className="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container transition-colors"
-                          title="Download file"
-                        >
-                          <span className="material-symbols-outlined text-lg">download</span>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Drag & Drop Ingestion Dropzone Banner */}
-          <div className="m-6 p-6 rounded-xl bg-surface-container-low/70 border border-white/5 flex flex-col md:flex-row items-center justify-between gap-6 shadow-sm">
-            <div className="flex items-center gap-4">
-              <div className="w-12 h-12 rounded-xl bg-surface-container-high flex items-center justify-center text-primary shrink-0 shadow-inner">
-                <span className="material-symbols-outlined text-2xl">upload_file</span>
-              </div>
-              <div>
-                <h4 className="text-base text-on-surface font-semibold">Upload files to this folder</h4>
-                <p className="text-xs text-outline mt-0.5">
-                  Files are uploaded to the server using its configured chunk size and storage backend.
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3 w-full md:w-auto justify-end">
-              <button
-                type="button"
-                onClick={onOpenUpload}
-                className="px-4 py-2 bg-surface-container hover:bg-surface-container-high text-on-surface font-mono text-xs rounded transition-colors cursor-pointer"
-              >
-                Select files
-              </button>
-            </div>
-          </div>
+      <div className="flex flex-wrap items-center gap-2">
+        {folderPath.length > 0 && <button type="button" onClick={() => props.onNavigateFolder(folderPath.slice(0, -1))} aria-label="Go to parent folder" className={explorerButton}><span aria-hidden="true" className="material-symbols-outlined">arrow_upward</span></button>}
+        <div className="flex min-w-0 flex-1 basis-48 items-center gap-2 rounded-lg border border-white/10 bg-surface-container-lowest pl-3">
+          <span aria-hidden="true" className="material-symbols-outlined text-outline">search</span>
+          <label htmlFor="explorer-search" className="sr-only">Search all files and folders</label>
+          <input id="explorer-search" type="search" value={search} onChange={(event) => props.onSearchChange(event.target.value)} placeholder="Search files and folders" className="min-h-11 w-full min-w-0 rounded-lg bg-transparent px-1 text-base placeholder:text-outline focus-visible:outline-2 focus-visible:outline-primary" />
+          {search && <button type="button" aria-label="Clear search" onClick={() => props.onSearchChange('')} className={explorerButton}><span aria-hidden="true" className="material-symbols-outlined">close</span></button>}
         </div>
-
-        {/* Right-Hand File Inspector / Metadata Blade (380px fixed width desktop) */}
-        {isInspectorOpen && activeInspectionFile && (
-          <aside className="w-full xl:w-96 bg-surface-container-low border-l border-white/5 shrink-0 flex flex-col shadow-xl animate-in slide-in-from-right duration-200">
-            {/* Panel Header */}
-            <div className="p-4 bg-surface-container-low border-b border-white/5 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="material-symbols-outlined text-primary text-lg">info</span>
-                <span className="text-sm font-semibold text-on-surface">File Inspector</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  onClick={() => window.open(api.files.streamUrl(activeInspectionFile.id), '_blank')}
-                  className="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container transition-colors"
-                  title="Open Fullscreen Viewport"
-                >
-                  <span className="material-symbols-outlined text-base">open_in_full</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsInspectorOpen(false)}
-                  className="p-1 rounded text-outline hover:text-on-surface hover:bg-surface-container transition-colors"
-                  title="Close Inspector"
-                >
-                  <span className="material-symbols-outlined text-base">close</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-6">
-              {/* Media Preview Frame with Scrub Simulator */}
-              <div className="relative rounded-xl overflow-hidden group">
-                {activeInspectionFile.type === 'video' ? (
-                  <VideoPlayer
-                    key={activeInspectionFile.id}
-                    src={api.files.streamUrl(activeInspectionFile.id)}
-                    poster={activeInspectionFile.previewUrl}
-                  />
-                ) : activeInspectionFile.type === 'design' ? (
-                  <img
-                    src={api.files.streamUrl(activeInspectionFile.id)}
-                    alt={activeInspectionFile.name}
-                    className="w-full max-h-72 object-contain bg-black rounded-xl border border-white/10"
-                  />
-                ) : (
-                  <div className="w-full h-44 flex items-center justify-center text-outline bg-surface-container-lowest rounded-xl border border-white/5">
-                    <span className="material-symbols-outlined text-5xl">
-                      {activeInspectionFile.type === 'doc'
-                        ? 'description'
-                        : activeInspectionFile.type === 'archive'
-                          ? 'folder_zip'
-                          : activeInspectionFile.type === 'code'
-                            ? 'data_object'
-                            : activeInspectionFile.type === 'folder'
-                              ? 'folder'
-                              : 'draft'}
-                    </span>
-                  </div>
-                )}
-                <div className="absolute top-2 left-2 z-10 flex items-center gap-1.5 px-2 py-0.5 rounded bg-surface-container-lowest/80 backdrop-blur-md text-[10px] font-mono text-secondary-fixed pointer-events-none">
-                  <span className="w-1.5 h-1.5 rounded-full bg-secondary-container"></span>
-                  {activeInspectionFile.extension?.toUpperCase() || 'FILE'}
-                </div>
-              </div>
-
-              {/* Title & Quick Action buttons */}
-              <div>
-                <h3 className="text-base font-bold text-on-surface break-words leading-tight">
-                  {activeInspectionFile.name}
-                </h3>
-                <p className="font-mono text-xs text-outline mt-1">
-                  Ingested {activeInspectionFile.modified} · {activeInspectionFile.size} ({activeInspectionFile.sizeBytes.toLocaleString()} bytes)
-                </p>
-                <div className="grid grid-cols-2 gap-2 mt-4">
-                  <button
-                    type="button"
-                    onClick={() => onDownloadFile(activeInspectionFile)}
-                    className="flex items-center justify-center gap-1.5 py-2 px-3 bg-primary-container hover:bg-secondary-container text-on-primary-container hover:text-on-secondary-fixed-variant font-mono text-xs font-semibold rounded shadow-sm transition-all cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-base">download</span>
-                    <span>Download</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name })}
-                    className="flex items-center justify-center gap-1.5 py-2 px-3 bg-surface-container hover:bg-surface-container-high text-on-surface font-mono text-xs rounded border border-white/5 transition-colors cursor-pointer"
-                  >
-                    <span className="material-symbols-outlined text-base">share</span>
-                    <span>Share Link</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Technical Specifications */}
-              <div className="p-4 rounded-xl bg-surface-container border border-white/5 space-y-3 shadow-inner">
-                <div className="flex items-center justify-between pb-1">
-                  <span className="font-mono text-xs text-outline uppercase tracking-wider">Technical Specs</span>
-                  <span className="font-mono text-xs text-outline">{activeInspectionFile.type}</span>
-                </div>
-                <div className="grid grid-cols-2 gap-y-1.5 font-mono text-xs">
-                  <div className="text-outline">File size</div><div className="text-on-surface text-right">{activeInspectionFile.size}</div>
-                  <div className="text-outline">MIME type</div><div className="text-on-surface text-right break-all">{activeInspectionFile.type}</div>
-                  {activeInspectionFile.technicalSpecs?.resolution && <><div className="text-outline">Resolution</div><div className="text-on-surface text-right">{activeInspectionFile.technicalSpecs.resolution}</div></>}
-                  <div className="text-outline">Last updated</div><div className="text-on-surface text-right">{new Date(activeInspectionFile.modifiedTs).toLocaleString()}</div>
-                </div>
-
-                <div className="pt-2 border-t border-white/5">
-                  <div className="flex items-center justify-between text-outline font-mono text-xs mb-1">
-                    <span>SHA-256 Checksum</span>
-                    <button
-                      type="button"
-                      onClick={() => onCopyChecksum(activeInspectionFile.sha256)}
-                      disabled={!activeInspectionFile.sha256}
-                      className="text-primary hover:underline cursor-pointer"
-                    >
-                      Copy
-                    </button>
-                  </div>
-                  <div className="p-2 rounded bg-surface-container-lowest font-mono text-[11px] text-on-surface-variant truncate select-all">
-                    {activeInspectionFile.sha256}
-                  </div>
-                </div>
-              </div>
-
-              {/* Actual shares */}
-              <div className="p-4 rounded-xl bg-surface-container border border-white/5 space-y-3 shadow-inner">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs text-outline uppercase tracking-wider">Share Links</span>
-                  <button
-                    type="button"
-                    onClick={() => onOpenCreateShare({ fileId: activeInspectionFile.id, name: activeInspectionFile.name })}
-                    className="text-primary text-xs font-mono hover:underline cursor-pointer"
-                  >
-                    + Manage
-                  </button>
-                </div>
-                {detailsLoading ? <p className="text-xs text-outline">Loading share records…</p> : null}
-                {detailsError ? <div role="alert" className="flex justify-between gap-2 text-xs text-error"><span>{detailsError}</span><button type="button" onClick={() => setDetailsReload((value) => value + 1)} className="underline">Retry</button></div> : null}
-                {!detailsLoading && fileShares.length ? fileShares.map((share) => (
-                  <div key={share.id} className="p-2.5 rounded-lg bg-surface-container-low border border-white/5">
-                    <p className="text-xs text-on-surface truncate">{share.vanityEndpoint}</p>
-                    <p className="font-mono text-[10px] text-outline mt-1">{share.isRevoked ? 'Revoked' : share.isExpired ? 'Expired' : 'Active'} · {share.viewsCount} views · {share.quotaUsed} downloads · {share.expiry}</p>
-                  </div>
-                )) : !detailsLoading && !detailsError ? <p className="text-xs text-outline">No share links for this file.</p> : null}
-              </div>
-
-              {/* Current file record */}
-              <div className="p-4 rounded-xl bg-surface-container border border-white/5 space-y-3 shadow-inner">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs text-outline uppercase tracking-wider">File Record</span>
-                  <span className="font-mono text-xs text-secondary-fixed">{activeInspectionFile.isDeleted ? 'In trash' : 'Stored'}</span>
-                </div>
-                <p className="text-xs text-outline">Last modified {new Date(activeInspectionFile.modifiedTs).toLocaleString()}</p>
-              </div>
-
-              {/* Activity Audit Trail */}
-              <div className="p-4 rounded-xl bg-surface-container border border-white/5 space-y-2.5 shadow-inner">
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs text-outline uppercase tracking-wider">Activity Audit Log</span>
-                  <button type="button" onClick={onExportAuditLogs} className="text-primary text-[11px] hover:underline">Export CSV</button>
-                </div>
-                {fileActivity.length ? <div className="space-y-2 text-xs">{fileActivity.map((item) => <div key={item.id} className="flex items-start gap-2 text-on-surface-variant"><span className="material-symbols-outlined text-sm text-secondary-fixed-dim mt-0.5">history</span><div><span>{item.action.replaceAll('_', ' ')}</span><span className="block text-outline font-mono text-[10px]">{new Date(item.at).toLocaleString()} · {item.ip ?? 'IP unavailable'}</span></div></div>)}</div> : !detailsLoading && <div className="text-xs text-outline">No activity recorded for this file.</div>}
-              </div>
-            </div>
-          </aside>
-        )}
+        <label htmlFor="explorer-sort" className="sr-only">Sort files and folders</label>
+        <select id="explorer-sort" value={props.sortBy} onChange={(event) => props.onSortChange(event.target.value as AllFilesViewProps['sortBy'], props.sortOrder)} className="min-h-11 max-w-full rounded-lg border border-white/10 bg-surface-container px-3 text-sm focus-visible:outline-2 focus-visible:outline-primary">
+          <option value="name">Name</option><option value="modified">Date modified</option><option value="size">Size</option>
+        </select>
+        <button type="button" aria-label={props.sortOrder === 'asc' ? 'Sort descending' : 'Sort ascending'} onClick={() => props.onSortChange(props.sortBy, props.sortOrder === 'asc' ? 'desc' : 'asc')} className={explorerButton}><span aria-hidden="true" className="material-symbols-outlined">{props.sortOrder === 'asc' ? 'arrow_upward' : 'arrow_downward'}</span></button>
+        <button type="button" onClick={props.onRefresh} disabled={props.isLoading || props.foldersLoading} aria-label="Refresh files" className={explorerButton}><span aria-hidden="true" className={`material-symbols-outlined ${props.isLoading ? 'motion-safe:animate-spin' : ''}`}>refresh</span></button>
+        <button type="button" aria-pressed={detailsOpen} onClick={() => setDetailsOpen((open) => !open)} className={`${explorerButton} flex items-center gap-2 ${detailsOpen ? 'bg-surface-container-high text-primary' : ''}`}><span aria-hidden="true" className="material-symbols-outlined">info</span><span className="hidden sm:inline">Details</span></button>
       </div>
     </div>
-  );
+
+    <div className="flex min-h-16 flex-wrap items-center gap-2 border-b border-white/5 px-3 py-2 sm:px-6">
+      <label className="flex min-h-11 min-w-11 cursor-pointer items-center justify-center" title="Select all loaded items">
+        <input ref={selectAllRef} type="checkbox" aria-label="Select all loaded items" checked={allSelected} onChange={(event) => setSelected(event.target.checked ? entries.map(itemKey) : [])} className="h-4 w-4 accent-primary-container focus-visible:outline-2 focus-visible:outline-primary" />
+      </label>
+      <span role="status" className="mr-2 text-sm text-on-surface-variant">{selectedItems.length ? `${selectedItems.length} selected` : `${props.total} ${props.total === 1 ? 'item' : 'items'}`}</span>
+      {selectedItems.length > 0 && <>
+        <button type="button" disabled={selectionBusy} onClick={() => setPicker({ mode: 'move', items: selectedItems })} className={explorerButton}>Move to</button>
+        <button type="button" disabled={selectionBusy} onClick={() => setPicker({ mode: 'copy', items: selectedItems })} className={explorerButton}>Copy to</button>
+        {single && <button type="button" disabled={selectionBusy} onClick={() => setNameDialog({ mode: 'rename', item: single })} className={explorerButton}>Rename</button>}
+        {activeFile && <>
+          <button type="button" onClick={() => props.onDownloadFile(activeFile)} className={explorerButton}>Download</button>
+          <button type="button" onClick={() => props.onOpenCreateShare({ fileId: activeFile.id, name: activeFile.name })} className={explorerButton}>Share</button>
+        </>}
+        <button type="button" disabled={selectionBusy} onClick={() => trash(selectedItems)} className={`${explorerButton} text-error`}>Trash</button>
+        <button type="button" aria-label="Clear selection" onClick={() => { setSelected([]); anchor.current = null; }} className={explorerButton}><span aria-hidden="true" className="material-symbols-outlined">close</span></button>
+      </>}
+      {clipboard?.items.length ? <div className="flex min-w-0 flex-wrap items-center gap-1 sm:ml-auto">
+        <span className="text-xs text-on-surface-variant">{clipboard.items.length} ready to {clipboard.mode === 'move' ? 'move' : 'copy'}</span>
+        <button type="button" disabled={clipboard.items.some((item) => busy[itemKey(item)])} onClick={paste} className={`${explorerButton} text-primary`}>Paste here</button>
+        <button type="button" onClick={() => props.onClipboardChange(null)} aria-label="Clear clipboard" className={explorerButton}><span aria-hidden="true" className="material-symbols-outlined">close</span></button>
+      </div> : null}
+    </div>
+    {notice && <p role="status" className="px-5 py-3 text-sm text-primary">{notice}</p>}
+    {actionError && <div role="alert" className="flex items-start justify-between gap-2 border-b border-error/20 bg-error-container/10 px-5 py-2"><p className="min-w-0 self-center break-words text-sm text-error">{actionError}</p><button type="button" aria-label="Dismiss error" onClick={() => setActionError(null)} className={explorerButton}><span aria-hidden="true" className="material-symbols-outlined">close</span></button></div>}
+    {props.foldersError && <div role="alert" className="flex flex-wrap items-center gap-2 p-4 text-sm text-error"><p className="min-w-0 break-words">{props.foldersError}</p><button type="button" onClick={props.onRetryFolders} className={`${explorerButton} underline`}>Retry folders</button></div>}
+    {props.loadError && <div role="alert" className="flex flex-wrap items-center gap-2 p-4 text-sm text-error"><p className="min-w-0 break-words">{props.loadError}</p><button type="button" onClick={props.onRetry} className={`${explorerButton} underline`}>Retry</button></div>}
+
+    <div className="flex min-w-0 flex-col xl:flex-row">
+      <div className={`relative min-w-0 flex-1 ${externalDrag ? 'bg-primary/10 ring-2 ring-inset ring-primary' : ''}`}>
+        {externalDrag && <p role="status" className="pointer-events-none sticky top-0 z-10 bg-primary-container p-4 text-center text-sm font-medium text-on-primary-container">Drop files to upload to {folderPath.at(-1)?.name ?? 'My files'}</p>}
+        {viewLayout === 'list' && <div aria-hidden="true" className="hidden grid-cols-[44px_minmax(0,1fr)_110px_150px_44px] gap-3 border-b border-white/5 px-3 py-3 text-xs text-on-surface-variant md:grid sm:px-6"><span /><span>Name</span><span>Size</span><span>Date modified</span><span /></div>}
+        <div role="grid" aria-label={search ? 'Search results' : 'Files and folders'} aria-multiselectable="true" aria-busy={props.isLoading || props.foldersLoading} tabIndex={entries.length ? -1 : 0} className={viewLayout === 'grid' ? 'grid grid-cols-1 gap-3 p-3 sm:grid-cols-2 sm:p-6 2xl:grid-cols-3' : 'divide-y divide-white/5'}
+          onClick={(event) => { if (event.target === event.currentTarget) { setSelected([]); anchor.current = null; } }}>
+          {entries.map((item, index) => {
+            const key = itemKey(item);
+            const file = item.type === 'file' ? files.find((candidate) => candidate.id === item.id) : null;
+            const folder = item.type === 'folder' ? folders.find((candidate) => candidate.id === item.id) : null;
+            const checked = selected.includes(key);
+            const cut = clipboard?.mode === 'move' && clipboard.items.some((candidate) => itemKey(candidate) === key);
+            return <div key={key} ref={(element) => { if (element) rowRefs.current.set(key, element); else rowRefs.current.delete(key); }} role="row" aria-selected={checked} aria-label={item.name}
+              tabIndex={focused === key || (!focused && index === 0) ? 0 : -1} onFocus={() => setFocused(key)} draggable={!busy[key]}
+              onClick={(event) => { if (event.detail <= 1 || event.ctrlKey || event.metaKey || event.shiftKey) selectItem(item, event); event.currentTarget.focus(); }} onDoubleClick={() => openItem(item)}
+              onContextMenu={(event) => { event.preventDefault(); openMenu(item, event.clientX, event.clientY, event.currentTarget); }}
+              onDragStart={(event) => {
+                const targets = checked ? selectedItems : [item];
+                if (targets.some((candidate) => busyItems.current.has(itemKey(candidate)))) { event.preventDefault(); return; }
+                if (!checked) selectItem(item);
+                dragItems.current = targets;
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData(dragType, JSON.stringify(targets));
+              }} onDragEnd={() => { dragItems.current = []; setDropTarget(null); }}
+              onDragOver={(event) => { if (folder && isInternal(event)) { event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = 'move'; setDropTarget(key); } }}
+              onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget((previous) => previous === key ? null : previous); }}
+              onDrop={(event) => { if (folder && isInternal(event)) moveDropped(event, folder.id); }}
+              className={`group relative grid min-w-0 items-center gap-2 transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-primary ${viewLayout === 'grid' ? 'grid-cols-[44px_minmax(0,1fr)_44px] rounded-xl border border-white/10 p-3' : 'grid-cols-[44px_minmax(0,1fr)_44px] px-3 py-1 md:grid-cols-[44px_minmax(0,1fr)_110px_150px_44px] md:gap-3 sm:px-6'} ${dropTarget === key ? 'bg-primary/20 ring-2 ring-inset ring-primary' : checked ? 'bg-primary/10' : 'hover:bg-surface-container-low'} ${cut ? 'opacity-60' : ''}`}>
+              <div role="gridcell">
+                <label className="flex min-h-11 min-w-11 cursor-pointer items-center justify-center" onClick={(event) => event.stopPropagation()} onDoubleClick={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onDragStart={(event) => { event.preventDefault(); event.stopPropagation(); }}>
+                  <input type="checkbox" aria-label={`Select ${item.name}`} checked={checked} onChange={() => selectItem(item, { ctrlKey: true })} className="h-4 w-4 accent-primary-container focus-visible:outline-2 focus-visible:outline-primary" />
+                </label>
+              </div>
+              <div role="gridcell" className="flex min-w-0 items-center gap-3 py-2">
+                <span aria-hidden="true" className={`material-symbols-outlined shrink-0 ${folder ? 'text-primary' : 'text-on-surface-variant'} ${viewLayout === 'grid' ? 'text-3xl' : 'text-2xl'}`}>{folder ? 'folder' : file ? iconForFile(file) : 'draft'}</span>
+                <div className="min-w-0"><p title={item.name} className="truncate text-sm font-medium text-on-surface">{item.name}</p>
+                  <p className="truncate text-xs text-on-surface-variant">{busy[key] ? `${busy[key]}...` : folder ? 'Folder' : viewLayout === 'grid' ? `${file?.size ?? ''} ${file?.extension ? ` / ${file.extension.toUpperCase()}` : ''}` : file?.extension?.toUpperCase() ?? 'File'}</p>
+                </div>
+              </div>
+              {viewLayout === 'list' && <><div role="gridcell" className="hidden text-sm text-on-surface-variant md:block">{file?.size ?? '-'}</div><div role="gridcell" className="hidden truncate text-sm text-on-surface-variant md:block">{file?.modified ?? (folder ? new Date(folder.modified).toLocaleDateString() : '')}</div></>}
+              <div role="gridcell"><button type="button" aria-label={`More actions for ${item.name}`} aria-haspopup="menu" aria-expanded={menu?.items.some((candidate) => itemKey(candidate) === key) ?? false}
+                onPointerDown={(event) => event.stopPropagation()} onDragStart={(event) => { event.preventDefault(); event.stopPropagation(); }} onDoubleClick={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); const bounds = event.currentTarget.getBoundingClientRect(); openMenu(item, bounds.right - 256, bounds.bottom, event.currentTarget); }} className={`${explorerButton} flex items-center justify-center p-0 text-on-surface-variant`}><span aria-hidden="true" className="material-symbols-outlined">more_horiz</span></button></div>
+            </div>;
+          })}
+        </div>
+        {!entries.length && !(props.isLoading || props.foldersLoading) && !props.loadError && !props.foldersError && <div className="px-5 py-16 text-center">
+          <span aria-hidden="true" className="material-symbols-outlined mb-3 text-5xl text-primary">{search ? 'search' : 'folder_open'}</span>
+          <h2 className="text-lg font-medium">{search ? 'No matching files or folders' : 'This folder is empty'}</h2>
+          <p className="mt-2 text-sm text-on-surface-variant">{search ? 'Try a different name.' : 'Drop files here, upload from your computer, or create a folder.'}</p>
+          {!search && <button type="button" onClick={props.onOpenUpload} className={`${explorerButton} mt-4 bg-primary-container text-on-primary-container hover:bg-primary`}>Upload files</button>}
+        </div>}
+        {(props.isLoading || props.foldersLoading) && <p role="status" className="p-6 text-center text-sm text-on-surface-variant">Loading...</p>}
+        {props.nextOffset !== null && <div className="flex flex-wrap items-center justify-center gap-3 p-5"><span className="text-sm text-on-surface-variant">Showing {entries.length} of {props.total} items</span><button type="button" onClick={props.onLoadMore} disabled={props.isLoading} className={`${explorerButton} bg-surface-container`}>Load more</button></div>}
+        {entries.length > 0 && <p className="px-6 py-5 text-xs text-on-surface-variant">Double-click to open. Drag files here to upload. {selectedItems.length > 1 ? 'Download is available for one file at a time; your browser handles each download separately.' : 'Use Ctrl / Cmd to select more than one item.'}</p>}
+      </div>
+      {detailsOpen && <FileDetails item={single} file={activeFile} shareRevision={props.shareRevision} onClose={() => setDetailsOpen(false)} onCopyChecksum={props.onCopyChecksum} onExportAuditLogs={props.onExportAuditLogs} />}
+    </div>
+    {menu && <ExplorerMenu x={menu.x} y={menu.y} actions={menuActions} returnFocus={menu.trigger} onClose={() => setMenu(null)} />}
+    {trashItems && <TrashConfirmation items={trashItems} onClose={() => setTrashItems(null)} onConfirm={async () => {
+      await runAction('Moving to trash', trashItems, () => props.onTrash(trashItems));
+      if (mounted.current) setSelected((previous) => previous.filter((key) => !trashItems.some((item) => itemKey(item) === key)));
+    }} />}
+    {nameDialog && <ExplorerNameDialog mode={nameDialog.mode} itemName={nameDialog.item?.name} onClose={() => setNameDialog(null)} onSubmit={(name) => nameDialog.item ? runAction('Renaming', [nameDialog.item], () => props.onRename(nameDialog.item!, name)) : props.onCreateFolder(name)} />}
+    {picker && <FolderPickerModal initialPath={folderPath} items={picker.items} mode={picker.mode} onClose={() => setPicker(null)} onSubmit={(destinationId) => runAction(picker.mode === 'move' ? 'Moving' : 'Copying', picker.items, () => props.onTransfer(picker.items, destinationId, picker.mode))} />}
+    {preview && <FilePreview file={preview} onClose={() => setPreview(null)} onDownload={() => props.onDownloadFile(preview)} onShare={() => props.onOpenCreateShare({ fileId: preview.id, name: preview.name })} />}
+  </div>;
 };
+
+function TrashConfirmation({ items, onClose, onConfirm }: { items: DriveItem[]; onClose: () => void; onConfirm: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  return <ExplorerDialog title="Move to trash?" onClose={onClose}>
+    <div className="space-y-4 p-5">
+      <p className="break-words text-sm">{items.length === 1 ? `Move "${items[0].name}" to trash?` : `Move ${items.length} selected items to trash?`} Files can be restored from Trash.</p>
+      {items.some((item) => item.type === 'folder') && <p className="rounded-lg bg-surface-container p-3 text-sm text-on-surface-variant">Folder trash is not supported yet. Folders will not be permanently deleted or emptied. The server will report any unsupported items.</p>}
+      {error && <p role="alert" className="break-words text-sm text-error">{error}</p>}
+      {busy && <p role="status" className="text-sm text-on-surface-variant">Moving to trash... Closing this dialog will not cancel the request.</p>}
+      <div className="flex flex-wrap justify-end gap-2">
+        <button type="button" autoFocus onClick={onClose} className={explorerButton}>Cancel</button>
+        <button type="button" disabled={busy || !!error} onClick={async () => {
+          if (busy) return;
+          setBusy(true); setError(null);
+          try { await onConfirm(); if (mounted.current) onClose(); }
+          catch (cause) { if (mounted.current) setError(cause instanceof Error ? cause.message : 'Could not move the items to trash.'); }
+          finally { if (mounted.current) setBusy(false); }
+        }} className={`${explorerButton} bg-error-container text-on-error-container hover:bg-error-container/80`}>{busy ? 'Moving...' : 'Move to trash'}</button>
+      </div>
+    </div>
+  </ExplorerDialog>;
+}
+
+function FilePreview({ file, onClose, onDownload, onShare }: { file: FileItem; onClose: () => void; onDownload: () => void; onShare: () => void }) {
+  const [imageError, setImageError] = useState(false);
+  const isImage = /^(png|jpe?g|gif|webp|avif|bmp|svg|ico)$/i.test(file.extension ?? '');
+  return <ExplorerDialog title={file.name} onClose={onClose} wide>
+    <div className="space-y-4 p-4">
+      {file.type === 'video' ? <VideoPlayer key={file.id} src={api.files.streamUrl(file.id)} poster={file.previewUrl} /> : isImage && !imageError ? <img src={api.files.streamUrl(file.id)} alt={file.name} onError={() => setImageError(true)} className="max-h-[65dvh] w-full rounded-lg bg-surface-container-lowest object-contain" /> : <div className="rounded-xl bg-surface-container-lowest px-4 py-16 text-center"><span aria-hidden="true" className="material-symbols-outlined text-5xl text-primary">{iconForFile(file)}</span><p className="mt-4 text-sm text-on-surface-variant">{imageError ? 'The image could not be loaded.' : 'A preview is not available for this file.'}</p><p className="mt-2 text-sm text-on-surface-variant">Download it to open it on your computer.</p></div>}
+      <div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-on-surface-variant">{file.size}</p><div className="flex gap-2"><button type="button" onClick={onShare} className={explorerButton}>Share</button><button type="button" onClick={onDownload} className={`${explorerButton} bg-primary-container text-on-primary-container hover:bg-primary`}>Download</button></div></div>
+    </div>
+  </ExplorerDialog>;
+}
+
+function FileDetails({ item, file, shareRevision, onClose, onCopyChecksum, onExportAuditLogs }: {
+  item: DriveItem | null; file: FileItem | null; shareRevision: number; onClose: () => void;
+  onCopyChecksum: (hash: string) => void; onExportAuditLogs?: () => void;
+}) {
+  const [shares, setShares] = useState<ExternalLink[]>([]);
+  const [activity, setActivity] = useState<api.ApiActivity[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  useEffect(() => {
+    setShares([]); setActivity([]); setError(null);
+    if (!file) { setLoading(false); return; }
+    let active = true;
+    setLoading(true);
+    void Promise.all([api.shares.forFile(file.id), api.activity.list({ fileId: file.id, limit: 10 })])
+      .then(([links, records]) => { if (active) { setShares(links.shares); setActivity(records.items); } })
+      .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : 'Could not load details.'); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [file?.id, shareRevision, reload]);
+  return <aside aria-label="Item details" className="w-full shrink-0 border-t border-white/10 bg-surface-container-low xl:w-80 xl:border-t-0 xl:border-l">
+    <div className="flex items-center justify-between gap-2 border-b border-white/5 p-4"><h2 className="font-medium">Details</h2><button type="button" aria-label="Close details" onClick={onClose} className={explorerButton}><span aria-hidden="true" className="material-symbols-outlined">close</span></button></div>
+    <div className="space-y-5 p-5">
+      {!item ? <p className="text-sm text-on-surface-variant">Select one file or folder to see its details.</p> : <>
+        <h3 className="break-words text-base font-semibold">{item.name}</h3>
+        <dl className="space-y-3 text-sm"><div className="flex justify-between gap-3"><dt className="text-on-surface-variant">Type</dt><dd>{item.type === 'folder' ? 'Folder' : file?.extension?.toUpperCase() ?? 'File'}</dd></div>
+          {file && <><div className="flex justify-between gap-3"><dt className="text-on-surface-variant">Size</dt><dd>{file.size}</dd></div><div><dt className="text-on-surface-variant">Modified</dt><dd className="mt-1">{new Date(file.modifiedTs).toLocaleString()}</dd></div></>}
+        </dl>
+        {file && <>
+          {loading && <p role="status" className="text-sm text-on-surface-variant">Loading details...</p>}
+          {error && <div role="alert"><p className="break-words text-sm text-error">{error}</p><button type="button" onClick={() => setReload((value) => value + 1)} className={`${explorerButton} text-primary`}>Retry</button></div>}
+          <section><h4 className="mb-2 text-sm font-medium">Shared links</h4>{shares.length ? shares.map((share) => <div key={share.id} className="mb-2 rounded-lg bg-surface-container p-3 text-sm"><p className="break-all">{share.vanityEndpoint}</p><p className="mt-1 text-xs text-on-surface-variant">{share.isRevoked ? 'Revoked' : share.isExpired ? 'Expired' : 'Active'}</p></div>) : !loading && !error && <p className="text-sm text-on-surface-variant">No shared links.</p>}</section>
+          <section><h4 className="mb-2 text-sm font-medium">Activity</h4>{activity.length ? activity.map((record) => <div key={record.id} className="mb-3 text-sm"><p>{record.action.replaceAll('_', ' ')}</p><p className="mt-1 text-xs text-on-surface-variant">{new Date(record.at).toLocaleString()}</p></div>) : !loading && !error && <p className="text-sm text-on-surface-variant">No activity yet.</p>}</section>
+          <details className="border-t border-white/10 pt-3"><summary className="min-h-11 cursor-pointer py-3 text-sm text-on-surface-variant focus-visible:outline-2 focus-visible:outline-primary">More information</summary><div className="space-y-3 pt-2"><p className="break-all font-mono text-xs text-on-surface-variant">SHA-256: {file.sha256 || 'Unavailable'}</p><button type="button" disabled={!file.sha256} onClick={() => onCopyChecksum(file.sha256)} className={explorerButton}>Copy checksum</button>{onExportAuditLogs && <button type="button" onClick={onExportAuditLogs} className={explorerButton}>Export activity</button>}</div></details>
+        </>}
+      </>}
+    </div>
+  </aside>;
+}

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { FileItem, ViewMode } from '../types';
+import { ExplorerDialog } from './modals/ExplorerDialog';
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -9,6 +10,7 @@ interface CommandPaletteProps {
   onChangeView: (view: ViewMode) => void;
   onOpenUpload: () => void;
   onOpenCreateShare: () => void;
+  onSearchDrive: (query: string) => void;
 }
 
 export const CommandPalette: React.FC<CommandPaletteProps> = ({
@@ -18,7 +20,8 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   onSelectFile,
   onChangeView,
   onOpenUpload,
-  onOpenCreateShare
+  onOpenCreateShare,
+  onSearchDrive,
 }) => {
   const [query, setQuery] = useState('');
 
@@ -48,28 +51,29 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
     : files.slice(0, 5);
 
   const navigationActions: { label: string; icon: string; view: ViewMode }[] = [
-    { label: 'Overview Telemetry & Live HUD', icon: 'dashboard', view: 'overview' },
-    { label: 'All Files & Inspector Blade', icon: 'folder_open', view: 'all-files' },
-    { label: 'Shared Vaults & Client Collaboration', icon: 'folder_shared', view: 'shared-vaults' },
-    { label: 'Security & Audit Fabric', icon: 'shield', view: 'security-access' },
-    { label: 'Recent & Starred Enclaves', icon: 'star', view: 'recent-starred' },
-    { label: 'Recovery & Trash Shredder', icon: 'delete_outline', view: 'recovery-trash' },
-    { label: 'Workspace Settings & API Keys', icon: 'settings', view: 'workspace-settings' },
+    { label: 'Overview', icon: 'dashboard', view: 'overview' },
+    { label: 'My files', icon: 'folder_open', view: 'all-files' },
+    { label: 'Shared links', icon: 'folder_shared', view: 'shared-vaults' },
+    { label: 'Security', icon: 'shield', view: 'security-access' },
+    { label: 'Recent & starred', icon: 'star', view: 'recent-starred' },
+    { label: 'Trash', icon: 'delete_outline', view: 'recovery-trash' },
+    { label: 'Settings & API keys', icon: 'settings', view: 'workspace-settings' },
   ];
 
   return (
-    <div className="fixed inset-0 bg-background/80 backdrop-blur-md z-50 flex items-start justify-center pt-20 p-4 animate-in fade-in duration-200">
-      <div className="w-full max-w-2xl bg-surface-container-low border border-white/10 rounded-2xl shadow-2xl overflow-hidden flex flex-col">
+    <ExplorerDialog title="Search & navigation" onClose={onClose}>
         {/* Search Input Bar */}
         <div className="p-4 bg-surface-container border-b border-white/5 flex items-center gap-3">
           <span className="material-symbols-outlined text-outline text-xl">search</span>
           <input
             autoFocus
+            aria-label="Search drive or recent files"
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search files by name, type, or checksum..."
-            className="w-full bg-transparent text-on-surface font-sans text-sm focus:outline-none placeholder:text-outline"
+            placeholder="Search files or jump to a view"
+            onKeyDown={(event) => { if (event.key === 'Enter' && query.trim()) { onSearchDrive(query.trim()); onClose(); } }}
+            className="min-h-11 w-full min-w-0 bg-transparent text-on-surface font-sans text-base focus:outline-none placeholder:text-outline"
           />
           <kbd className="font-mono text-xs px-2 py-0.5 bg-surface-container-highest text-on-surface-variant rounded">
             ESC
@@ -78,6 +82,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
 
         {/* Results List */}
         <div className="max-h-96 overflow-y-auto p-3 space-y-4">
+          {query.trim() && <button type="button" onClick={() => { onSearchDrive(query.trim()); onClose(); }} className="min-h-11 w-full rounded-lg bg-primary-container px-3 text-left text-sm text-on-primary-container">Search entire drive for “{query.trim()}”</button>}
           {/* Quick Actions */}
           {!query && (
             <div>
@@ -91,7 +96,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 >
                   <div className="flex items-center gap-2.5">
                     <span className="material-symbols-outlined text-primary text-base">cloud_upload</span>
-                    <span className="font-medium group-hover:text-primary transition-colors">Upload & Ingest New File</span>
+                    <span className="font-medium group-hover:text-primary transition-colors">Upload files</span>
                   </div>
                   <span className="font-mono text-outline text-[11px]">Upload file</span>
                 </button>
@@ -101,7 +106,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                 >
                   <div className="flex items-center gap-2.5">
                     <span className="material-symbols-outlined text-secondary-fixed text-base">add_moderator</span>
-                    <span className="font-medium group-hover:text-secondary-fixed transition-colors">Create Secure Client Share</span>
+                    <span className="font-medium group-hover:text-secondary-fixed transition-colors">Create a shared link</span>
                   </div>
                   <span className="font-mono text-outline text-[11px]">Share link</span>
                 </button>
@@ -112,7 +117,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
           {/* Files */}
           <div>
             <div className="px-3 py-1 text-[11px] font-mono text-outline uppercase tracking-wider">
-              {query ? `Matching Files (${filteredFiles.length})` : 'Frequently Accessed'}
+              {query ? `Matching recent files (${filteredFiles.length})` : 'Recent files'}
             </div>
             <div className="space-y-1">
               {filteredFiles.map((file) => (
@@ -163,7 +168,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
                     onChangeView(nav.view);
                     onClose();
                   }}
-                  className="w-full flex items-center gap-2.5 p-2 rounded-lg hover:bg-surface-container text-left transition-colors text-xs text-on-surface-variant hover:text-on-surface"
+                  className="min-h-11 w-full flex items-center gap-2.5 p-2 rounded-lg hover:bg-surface-container text-left transition-colors text-sm text-on-surface-variant hover:text-on-surface"
                 >
                   <span className="material-symbols-outlined text-base text-outline">{nav.icon}</span>
                   <span>{nav.label}</span>
@@ -172,7 +177,6 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
             </div>
           </div>
         </div>
-      </div>
-    </div>
+    </ExplorerDialog>
   );
 };
